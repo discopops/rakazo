@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   type ActionApprovalRule,
   applyJudgeDecision,
+  composioBatchContainsEmailSend,
   connectorKindFromToolName,
   connectorToolRequiresApproval,
+  emailSendRequiresExplicitApproval,
   isApprovalAskBlock,
   isSecretAskBlock,
   planActionGate,
@@ -49,6 +51,10 @@ describe("toolRequiresApproval", () => {
 
   it("gates connector executes except obvious reads", () => {
     expect(toolRequiresApproval("gmail_send_email", true)).toBe(true);
+    expect(toolRequiresApproval("GMAIL_CREATE_DRAFT", true, false)).toBe(false);
+    expect(toolRequiresApproval("GMAIL_UPDATE_DRAFT", true, false)).toBe(false);
+    expect(toolRequiresApproval("GMAIL_CREATE_EMAIL_DRAFT", true, false)).toBe(false);
+    expect(toolRequiresApproval("GMAIL_SEND_DRAFT", true, false)).toBe(true);
     expect(toolRequiresApproval("crm_create_note", true)).toBe(true);
     expect(toolRequiresApproval("get_contact", true)).toBe(false);
     expect(toolRequiresApproval("contacts_get", true)).toBe(false);
@@ -372,5 +378,49 @@ describe("applyJudgeDecision", () => {
   it("fails closed on consequential checker errors and open on exempt", () => {
     expect(applyJudgeDecision({ decision: "error", consequential: true })).toBe("ask");
     expect(applyJudgeDecision({ decision: "error", consequential: false })).toBe("allow");
+  });
+});
+
+describe("mandatory per-email send approval", () => {
+  it("recognizes direct Gmail and Outlook send/reply/forward but not draft creation", () => {
+    for (const name of [
+      "GMAIL_SEND_EMAIL",
+      "GMAIL_REPLY_TO_THREAD",
+      "GMAIL_SEND_DRAFT",
+      "OUTLOOK_SEND_EMAIL",
+      "MICROSOFT_OUTLOOK_FORWARD_MESSAGE",
+    ]) {
+      expect(emailSendRequiresExplicitApproval(name)).toBe(true);
+    }
+    for (const name of [
+      "GMAIL_LIST_THREADS",
+      "GMAIL_CREATE_DRAFT",
+      "GMAIL_UPDATE_DRAFT",
+      "GMAIL_GET_MESSAGE",
+      "SLACK_SEND_MESSAGE",
+    ]) {
+      expect(emailSendRequiresExplicitApproval(name)).toBe(false);
+    }
+  });
+
+  it("rejects nested Composio sends but allows all-read and draft-only batches", () => {
+    expect(
+      composioBatchContainsEmailSend("COMPOSIO_MULTI_EXECUTE_TOOL", {
+        tools: [
+          { tool_slug: "GMAIL_LIST_THREADS", arguments: {} },
+          { tool_slug: "GMAIL_SEND_EMAIL", arguments: { to: "a@example.test" } },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      composioBatchContainsEmailSend("COMPOSIO_MULTI_EXECUTE_TOOL", {
+        tools: [{ tool_slug: "GMAIL_CREATE_DRAFT", arguments: {} }],
+      }),
+    ).toBe(false);
+    expect(
+      composioBatchContainsEmailSend("OTHER_TOOL", {
+        tools: [{ tool_slug: "GMAIL_SEND_EMAIL" }],
+      }),
+    ).toBe(false);
   });
 });

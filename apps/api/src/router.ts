@@ -1589,9 +1589,11 @@ export function createRouter(deps: RouterDeps) {
         } catch (error) {
           throw mapSpaceLifecycleError(error);
         }
-        await enqueueBotIntroRun(deps, context.actor, bot).catch((error) => {
-          getLogger().error("bot intro run enqueue", error);
-        });
+        if (!input.skipIntro) {
+          await enqueueBotIntroRun(deps, context.actor, bot).catch((error) => {
+            getLogger().error("bot intro run enqueue", error);
+          });
+        }
         return bot;
       }),
       duplicate: authed.bots.duplicate.handler(async ({ context, input }) => {

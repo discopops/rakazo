@@ -87,6 +87,11 @@ export function connectorKindFromToolName(toolName: string, connectorKinds: stri
  * relaxes the name check: the provider chooses both the name and the hint.
  */
 export function connectorToolRequiresApproval(toolName: string, readOnly?: boolean): boolean {
+  // The owner permits composing and saving drafts. Sending an existing draft
+  // is a different action and is NEVER included in this exemption.
+  if (/^(gmail|outlook|microsoft_outlook)_(create|update|save)_(email_)?draft$/i.test(toolName)) {
+    return false;
+  }
   if (readOnly === false) return true;
   if (MUTATING_CONNECTOR_PATTERN.test(toolName)) return true;
   if (COMPOUND_CONNECTOR_ACTION_PATTERN.test(toolName)) return true;
@@ -108,6 +113,40 @@ export function toolRequiresApproval(
 /** Security-boundary changes cannot be auto-reviewed or permanently allowed. */
 export function toolRequiresExplicitApproval(toolName: string): boolean {
   return EXPLICIT_APPROVAL_BUILTIN_TOOLS.has(toolName);
+}
+
+/** A dispatched email requires a distinct owner approval. Never use an
+ * always-allow rule or an automated judge to authorize outbound mail.
+ * Composio may expose send, reply and forward under different tool names.
+ */
+export function emailSendRequiresExplicitApproval(
+  toolName: string,
+  connectorKind = connectorKindFromToolName(toolName),
+): boolean {
+  const normalizedKind = connectorKind.toLowerCase();
+  const normalizedName = toolName.toLowerCase();
+  const isEmail =
+    EMAIL_CONNECTOR_SLUGS.has(normalizedKind) ||
+    /^(gmail|outlook|microsoft_outlook)[_\W]/i.test(toolName);
+  if (!isEmail) return false;
+  return /(?:^|[^a-z0-9])(send|reply|forward|deliver)(?:[^a-z0-9]|$)/i.test(normalizedName);
+}
+
+/** Never run a Composio multi-execute call that hides an outbound email.
+ * A one-message direct call makes both payload review and replay unambiguous.
+ */
+export function composioBatchContainsEmailSend(
+  toolName: string,
+  args: Record<string, unknown>,
+): boolean {
+  if (toolName.toUpperCase() !== "COMPOSIO_MULTI_EXECUTE_TOOL") return false;
+  if (!Array.isArray(args.tools)) return false;
+  return args.tools.some((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+    const record = item as Record<string, unknown>;
+    const slug = typeof record.tool_slug === "string" ? record.tool_slug : "";
+    return emailSendRequiresExplicitApproval(slug);
+  });
 }
 
 /** External webhook runs may inspect state unattended, but side effects always need the owner. */

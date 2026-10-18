@@ -113,3 +113,21 @@ it("redacts known secrets in instruction approval details and editable metadata"
   );
   expect(JSON.stringify(block)).not.toContain("fake-token");
 });
+
+it("forces one-email approval without a permanent allow action", () => {
+  const block = buildApprovalAskBlock(
+    "effect-send-1",
+    "GMAIL_SEND_EMAIL",
+    { to: "recipient@example.test", subject: "Hello", body: "Approved content" },
+    [],
+    { requireOnce: true },
+  );
+  expect(block).toMatchObject({
+    approvalEffectId: "effect-send-1",
+    actions: [
+      { id: "allow", label: "Approve this email" },
+      { id: "deny", label: "Do not send" },
+    ],
+  });
+  expect(JSON.stringify(block)).not.toContain('"always"');
+});

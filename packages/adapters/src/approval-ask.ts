@@ -9,7 +9,7 @@ export function buildApprovalAskBlock(
   toolName: string,
   args: Record<string, unknown>,
   secrets: string[],
-  options?: { reviewReason?: string },
+  options?: { reviewReason?: string; requireOnce?: boolean },
 ): MessageBlock {
   if (toolName === "propose_instructions_update") {
     const before = redactSecrets(String(args.previousInstructions ?? ""), secrets);
@@ -54,11 +54,16 @@ export function buildApprovalAskBlock(
             { id: "allow", label: "Create space", outcome: "created" },
             { id: "deny", label: "Cancel", outcome: "cancelled" },
           ]
-        : [
-            { id: "allow", label: "Allow once" },
-            { id: "always", label: "Always allow this tool" },
-            { id: "deny", label: "Deny" },
-          ],
+        : options?.requireOnce
+          ? [
+              { id: "allow", label: "Approve this email" },
+              { id: "deny", label: "Do not send" },
+            ]
+          : [
+              { id: "allow", label: "Allow once" },
+              { id: "always", label: "Always allow this tool" },
+              { id: "deny", label: "Deny" },
+            ],
   };
 }
 

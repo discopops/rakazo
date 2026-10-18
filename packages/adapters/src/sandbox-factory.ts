@@ -11,6 +11,7 @@ import { E2BSandboxProvider } from "./e2b-sandbox.js";
 import { FakeSandboxProvider } from "./fake-sandbox.js";
 import { NoneSandboxProvider } from "./none-sandbox.js";
 import { RailwaySandboxProvider } from "./railway-sandbox.js";
+import { SshSandboxProvider } from "./ssh-sandbox.js";
 
 export interface SandboxProviderOptions {
   supervisorUrl?: string;
@@ -29,6 +30,12 @@ export interface SandboxProviderOptions {
   boxApiKey?: string;
   boxApiUrl?: string;
   dataDir?: string;
+  sshHost?: string;
+  sshUser?: string;
+  sshIdentityFile?: string;
+  sshPort?: string;
+  sshRemoteRoot?: string;
+  sshAllowedBotId?: string;
 }
 
 function missingRemoteKey(
@@ -76,6 +83,19 @@ export function createSandboxProvider(kind: string, opts: SandboxProviderOptions
         environmentId: opts.railwayEnvironmentId,
         maxWorkspaceFileBytes: opts.railwayMaxWorkspaceFileBytes,
       });
+    case "ssh":
+      if (!opts.sshHost?.trim() || !opts.sshUser?.trim() || !opts.sshIdentityFile?.trim())
+        return new NoneSandboxProvider(
+          "Computers unavailable: SSH_SANDBOX_HOST, SSH_SANDBOX_USER, and SSH_SANDBOX_IDENTITY_FILE are required.",
+        );
+      return new SshSandboxProvider({
+        host: opts.sshHost,
+        user: opts.sshUser,
+        identityFile: opts.sshIdentityFile,
+        port: opts.sshPort ? Number(opts.sshPort) : undefined,
+        remoteRoot: opts.sshRemoteRoot,
+        allowedBotId: opts.sshAllowedBotId,
+      });
     case "docker":
       return new DockerSandboxProvider(
         opts.supervisorUrl ?? "http://127.0.0.1:7091",
@@ -95,7 +115,7 @@ export function createSandboxProvider(kind: string, opts: SandboxProviderOptions
       return new FakeSandboxProvider();
     default:
       throw new Error(
-        `Unknown SANDBOX_PROVIDER "${kind}". Use none | docker | e2b | daytona | createos | box | railway | e2b-emulator | daytona-emulator | box-emulator | desktop | fake.`,
+        `Unknown SANDBOX_PROVIDER "${kind}". Use none | docker | e2b | daytona | createos | box | railway | ssh | e2b-emulator | daytona-emulator | box-emulator | desktop | fake.`,
       );
   }
 }

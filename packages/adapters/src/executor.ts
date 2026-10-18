@@ -64,9 +64,11 @@ import {
   botMessageAllowsSilence,
   CALL_CLIENT_NONCE_PREFIX,
   callIdFromClientNonce,
+  composioBatchContainsEmailSend,
   connectorKindFromToolName,
   containsSecret,
   createStreamingRedactor,
+  emailSendRequiresExplicitApproval,
   endsSentence,
   expandSkillReferencesInPrompt,
   formatSkillRunPrompt,
@@ -4546,6 +4548,14 @@ export function createRunExecutor(deps: ExecutorDeps) {
             }
           }
           if (name === "propose_instructions_update") effectRequest = args;
+          // A multi-execute batch cannot expose a single send for the user's
+          // recipient/body review. Require direct one-email-at-a-time calls.
+          if (composioBatchContainsEmailSend(name, args)) {
+            return {
+              error:
+                "Email sending/replying must use a separate direct tool call for each message so the owner can approve it individually.",
+            };
+          }
           const viaConnector = !BUILTIN_AGENT_TOOL_NAMES.has(name);
           // Declared effect of the operation this call dispatches (installed API method and
           // flag). Install config is immutable per route resource, so it cannot drift before
@@ -4562,12 +4572,14 @@ export function createRunExecutor(deps: ExecutorDeps) {
           const requiresApprovalByDefault =
             requiresUnattendedApproval ||
             toolRequiresApproval(name, viaConnector, declaredReadOnly);
-          const requiresMandatoryApproval =
-            requiresUnattendedApproval || toolRequiresExplicitApproval(name);
           const connectorKind = connectorKindFromToolName(
             name,
             connectedPlugins.map((plugin) => plugin.provider),
           );
+          const mandatoryEmailSend =
+            viaConnector && emailSendRequiresExplicitApproval(name, connectorKind);
+          const requiresMandatoryApproval =
+            requiresUnattendedApproval || toolRequiresExplicitApproval(name) || mandatoryEmailSend;
           const approvalResolved = requiresMandatoryApproval
             ? {
                 decision: "ask" as const,
@@ -4916,6 +4928,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
                   runSecrets,
                   {
                     reviewReason,
+                    requireOnce: mandatoryEmailSend,
                   },
                 ),
               ],

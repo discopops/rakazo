@@ -6,6 +6,13 @@ export function resolveSandboxProvider(source: NodeJS.ProcessEnv = process.env):
   if (configured !== undefined && !configured.trim()) return "none";
   const requested = configured?.trim() || "docker";
   if (requested === "none") return "none";
+  if (
+    requested === "ssh" &&
+    (!optional(source.SSH_SANDBOX_HOST) ||
+      !optional(source.SSH_SANDBOX_USER) ||
+      !optional(source.SSH_SANDBOX_IDENTITY_FILE))
+  )
+    return "none";
   if (requested === "e2b" && !optional(source.E2B_API_KEY)) return "none";
   if (requested === "daytona" && !optional(source.DAYTONA_API_KEY)) return "none";
   if (requested === "createos" && !optional(source.CREATEOS_SANDBOX_API_KEY)) return "none";
@@ -44,6 +51,12 @@ export function sandboxProviderOptionsFromEnv(
   | "railwayMaxWorkspaceFileBytes"
   | "boxApiKey"
   | "boxApiUrl"
+  | "sshHost"
+  | "sshUser"
+  | "sshIdentityFile"
+  | "sshPort"
+  | "sshRemoteRoot"
+  | "sshAllowedBotId"
 > {
   return {
     e2bApiKey: source.E2B_API_KEY,
@@ -59,6 +72,12 @@ export function sandboxProviderOptionsFromEnv(
     railwayMaxWorkspaceFileBytes: source.RAILWAY_MAX_WORKSPACE_FILE_BYTES,
     boxApiKey: source.BOX_API_KEY,
     boxApiUrl: source.BOX_API_URL ?? source.BOX_BASE_URL,
+    sshHost: source.SSH_SANDBOX_HOST,
+    sshUser: source.SSH_SANDBOX_USER,
+    sshIdentityFile: source.SSH_SANDBOX_IDENTITY_FILE,
+    sshPort: source.SSH_SANDBOX_PORT,
+    sshRemoteRoot: source.SSH_SANDBOX_ROOT,
+    sshAllowedBotId: source.SSH_SANDBOX_ALLOWED_BOT_ID,
   };
 }
 
