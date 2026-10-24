@@ -101,6 +101,7 @@ function fakes(opts: { onDevice?: boolean } = {}) {
     stopSpeaking,
     interim: (text: string) => handlers?.onInterim(text),
     hear: (text: string) => handlers?.onFinal(text),
+    dictationError: (error: string) => handlers?.onError?.(error),
     recordings,
     signals,
     speeches,
@@ -124,6 +125,18 @@ describe("mobile call session", () => {
     await flush();
     expect(getSnapshot()).toMatchObject({ botId: "bot-1", botName: "Ada", phase: "listening" });
     expect(fake.recordings).toHaveLength(1);
+  });
+
+  it("falls back to provider transcription when the device rejects its speech locale", async () => {
+    const fake = fakes({ onDevice: true });
+    startCall({ botId: "bot-1", botName: "Ada", transcribe: true }, fake.deps);
+    await flush();
+
+    fake.dictationError("language-not-supported");
+    await flush();
+
+    expect(fake.recordings).toHaveLength(1);
+    expect(getSnapshot()).toMatchObject({ phase: "listening" });
   });
 
   it("sends what it heard to the call's bot", async () => {

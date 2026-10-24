@@ -55,6 +55,7 @@ export type CallClip = { base64: string; mimeType: string };
 export type DictationHandlers = {
   onInterim: (text: string) => void;
   onFinal: (text: string) => void;
+  onError?: (error: string) => void;
 };
 
 /** Everything that touches the device or the server, so the loop stays testable. */
@@ -326,6 +327,22 @@ async function openMic(): Promise<void> {
           },
           onFinal: (text) => {
             if (mine()) void handleTranscript(text);
+          },
+          onError: (error) => {
+            if (!mine()) return;
+            controller.abort();
+            if (turn === controller) turn = null;
+            micOpen = false;
+            if (error === "language-not-supported") {
+              onDevice = false;
+              if (canTranscribe) {
+                void openMic();
+              } else {
+                set({ caption: t("Could not hear that.") });
+              }
+              return;
+            }
+            failTurn(new Error(error));
           },
         },
         controller.signal,
@@ -642,7 +659,12 @@ function productionDeps(): CallDeps {
 /** The device's own speech recognition, which works with a speak-only voice provider. */
 async function dictateTurn(handlers: DictationHandlers, signal: AbortSignal): Promise<boolean> {
   if (!(await dictation.available())) return false;
-  await dictation.listen({ ...handlers, signal, lang: getActiveUiLocale() });
+  const { getLocales } = await import("expo-localization");
+  await dictation.listen({
+    ...handlers,
+    signal,
+    lang: dictation.resolveSpeechLocale(getActiveUiLocale(), getLocales()[0]?.languageTag),
+  });
   return true;
 }
 

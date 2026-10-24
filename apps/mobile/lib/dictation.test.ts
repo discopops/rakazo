@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SpeechRecognizer } from "./dictation";
-import { ENDPOINT_SILENCE_MS, listen, setSpeechRecognizer, stop } from "./dictation";
+import {
+  ENDPOINT_SILENCE_MS,
+  listen,
+  resolveSpeechLocale,
+  setSpeechRecognizer,
+  stop,
+} from "./dictation";
 
 type Listener = (payload: never) => void;
 
@@ -58,6 +64,26 @@ afterEach(() => {
 });
 
 describe("mobile dictation", () => {
+  it("uses a region-specific recognizer locale for a generic English UI locale", () => {
+    expect(resolveSpeechLocale("en", "en-AU")).toBe("en-AU");
+    expect(resolveSpeechLocale("en")).toBe("en-US");
+  });
+
+  it("keeps the selected Chinese locale when the device language differs", () => {
+    expect(resolveSpeechLocale("zh-CN", "en-AU")).toBe("zh-CN");
+  });
+
+  it("reports an unsupported recognizer locale instead of leaving the session idle", async () => {
+    const onFinal = vi.fn();
+    const onError = vi.fn();
+    await listen({ onFinal, onError });
+
+    fake.fail("language-not-supported");
+
+    expect(onError).toHaveBeenCalledWith("language-not-supported");
+    expect(onFinal).not.toHaveBeenCalled();
+  });
+
   it("ends the turn only after the silence window, not on the recognizer's own final", async () => {
     const onFinal = vi.fn();
     const interims: string[] = [];

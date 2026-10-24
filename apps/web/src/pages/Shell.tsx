@@ -148,6 +148,7 @@ import {
 } from "../components/ComputersUnavailableHint";
 import { ComputerUpdateProgress } from "../components/ComputerUpdateProgress";
 import { CallCard } from "../components/call/CallCard";
+import { ChiefLiveCallCard } from "../components/call/ChiefLiveCallCard";
 import { VoiceChatCard } from "../components/call/VoiceChatCard";
 import { ComputerWorkspace } from "../components/computer/ComputerWorkspace";
 import { lazyOverlay } from "../components/ErrorBoundary";
@@ -182,6 +183,7 @@ import {
   shouldNotifyBrowser,
 } from "../lib/browser-notifications";
 import { startCall, useCallSession } from "../lib/call-session";
+import { chiefLiveEnabled, startChiefLive } from "../lib/chief-live.js";
 import { newClientId } from "../lib/client-id";
 import {
   beginComposerDraftSubmission,
@@ -3836,16 +3838,21 @@ export function ShellPage() {
             onVoice={
               !inGroup && active
                 ? () => {
-                    if (!voiceStatus?.ready) {
+                    const bot = { botId: active.id, botName: active.name, botColor: active.color };
+                    if (chiefLiveEnabled(bot.botName)) {
+                      void startChiefLive({
+                        id: bot.botId,
+                        name: bot.botName,
+                        color: bot.botColor,
+                      }).then((started) => {
+                        if (!started && voiceStatus?.ready)
+                          startCall({ ...bot, transcribe: Boolean(voiceStatus.transcribe) });
+                      });
+                    } else if (!voiceStatus?.ready) {
                       openSettings("voice");
-                      return;
+                    } else {
+                      startCall({ ...bot, transcribe: Boolean(voiceStatus.transcribe) });
                     }
-                    startCall({
-                      botId: active.id,
-                      botName: active.name,
-                      botColor: active.color,
-                      transcribe: voiceStatus ? Boolean(voiceStatus.transcribe) : undefined,
-                    });
                   }
                 : undefined
             }
@@ -3875,6 +3882,7 @@ export function ShellPage() {
       </main>
 
       <CallCard onSettings={() => openSettings("voice")} />
+      <ChiefLiveCallCard />
 
       <ResizableSidePanel
         botsSidebarCollapsed={botsSidebarCollapsed}

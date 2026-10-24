@@ -133,6 +133,32 @@ class ChiefTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             mail.update_status(self.db, "thread1", "a", "deferred", "2020-01-01T00:00:00+00:00")
         self.assertEqual(mail.briefing(self.db)["pending"][0]["status"], "needs_reply")
+    def test_attachment_notice_cannot_be_dismissed_as_noise(self):
+        original_request = mail.request_json
+        original_key = mail.require
+        try:
+            mail.request_json = lambda *args, **kwargs: {
+                "answers": {"decision": {"choice": "noise", "confidence": 0.99}}}
+            mail.require = lambda key: "test-not-a-key"
+            document = {"from": "school@example.org", "subject": "Reminder notice",
+                "snippet": "Please see attached", "body": "Please see attached",
+                "attachments": ["overdue-invoice.pdf"]}
+            self.assertEqual(mail.classify_jev(document), ("uncertain", 0.99))
+            document["attachments"] = []
+            self.assertEqual(mail.classify_jev(document), ("noise", 0.99))
+        finally:
+            mail.request_json = original_request
+            mail.require = original_key
+
+    def test_attachment_filenames_are_preserved_in_revision(self):
+        message = msg("a", 1000)
+        message["payload"]["parts"] = [{
+            "mimeType": "application/pdf", "filename": "invoice.pdf",
+            "body": {"attachmentId": "not-fetched"}
+        }]
+        rev = mail.thread_revision({"id": "t", "messages": [message]}, "me@example.com")
+        self.assertEqual(rev["inbound"]["attachments"], ["invoice.pdf"])
+
     def test_untrusted_message_not_commands(self):
         self.assertEqual(mail.decode_part("UGxlYXNlIHJlcGx5"),"Please reply")
         self.assertEqual(mail.header(msg("a",123),"Subject"),"Hello")

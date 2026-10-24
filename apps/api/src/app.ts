@@ -102,6 +102,7 @@ import { cors } from "hono/cors";
 import { storeInboundAttachment } from "./artifacts.js";
 import { createBillingService } from "./billing.js";
 import { mountBillingRoutes } from "./billing-webhook.js";
+import { mountChiefLiveRoutes } from "./chief-live.js";
 import type { AppEnv } from "./env.js";
 import { loadEnv } from "./env.js";
 import { healthRoutes } from "./health.js";
@@ -673,6 +674,15 @@ export async function createApp(
     if (actor) enrichLogContext({ "user.id": actor.userId, "space.id": actor.spaceId });
     return actor;
   });
+  mountChiefLiveRoutes(
+    app,
+    {
+      prisma,
+      enabled: process.env.CHIEF_LIVE_ENABLED === "true",
+      apiKey: process.env.OPENAI_API_KEY,
+    },
+    sessionActor,
+  );
   mountWebhookHttpRoutes(app, { prisma, secrets, events, jobs });
   if (billing && billingProvider) {
     mountBillingRoutes(app, {

@@ -11,7 +11,12 @@ const RESTART_MAX_MS = 2_000;
 /** Restarts in a row that hear nothing: the recognizer is wedged, stop churning the mic. */
 const MAX_DEAD_RESTARTS = 5;
 /** Errors that mean this turn cannot recover; the rest are routine and `end` restarts. */
-const FATAL_ERRORS = new Set(["not-allowed", "service-not-allowed", "audio-capture"]);
+const FATAL_ERRORS = new Set([
+  "not-allowed",
+  "service-not-allowed",
+  "audio-capture",
+  "language-not-supported",
+]);
 
 type ResultEvent = { isFinal: boolean; results: { transcript: string }[] };
 type ErrorEvent = { error?: string };
@@ -35,6 +40,7 @@ type Session = {
   lang: string;
   onInterim?: (text: string) => void;
   onFinal: (text: string) => void;
+  onError?: (error: string) => void;
   subs: { remove: () => void }[];
   /** Text from earlier recognizer sessions of the same utterance. */
   carried: string;
@@ -50,6 +56,32 @@ let injected: SpeechRecognizer | null = null;
 /** Test seam: an injected recognizer replaces the native module. */
 export function setSpeechRecognizer(recognizer: SpeechRecognizer | null): void {
   injected = recognizer;
+}
+
+/** iOS matches supported speech locales exactly; the app's English UI locale is only "en". */
+export function resolveSpeechLocale(uiLocale: string, deviceLocale?: string): string {
+  const normalizedUi = uiLocale.trim().replace(/_/g, "-");
+  const language = normalizedUi.split("-")[0]?.toLowerCase() || "en";
+  if (language === "zh") return "zh-CN";
+
+  const normalizedDevice = deviceLocale?.trim().replace(/_/g, "-");
+  if (
+    normalizedDevice?.includes("-") &&
+    normalizedDevice.split("-")[0]?.toLowerCase() === language
+  ) {
+    return normalizedDevice;
+  }
+
+  switch (language) {
+    case "en":
+      return "en-US";
+    case "de":
+      return "de-DE";
+    case "ru":
+      return "ru-RU";
+    default:
+      return normalizedUi || "en-US";
+  }
 }
 
 async function load(): Promise<SpeechRecognizer> {
@@ -92,6 +124,7 @@ export function stop(): void {
 export async function listen(opts: {
   onInterim?: (text: string) => void;
   onFinal: (text: string) => void;
+  onError?: (error: string) => void;
   signal?: AbortSignal;
   lang?: string;
 }): Promise<void> {
@@ -106,6 +139,7 @@ export async function listen(opts: {
     lang: opts.lang || "en-US",
     onInterim: opts.onInterim,
     onFinal: opts.onFinal,
+    onError: opts.onError,
     subs: [],
     carried: "",
     heard: "",
@@ -184,6 +218,12 @@ function onEnd(session: Session): void {
 function onError(session: Session, event: ErrorEvent): void {
   if (active !== session) return;
   if (!event?.error || !FATAL_ERRORS.has(event.error)) return;
+  if (event.error === "language-not-supported" && !join(session.carried, session.heard)) {
+    const onError = session.onError;
+    stop();
+    onError?.(event.error);
+    return;
+  }
   finish(session);
 }
 
