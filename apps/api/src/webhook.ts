@@ -3,14 +3,13 @@ import { hasValidBearerToken } from "@rakazo/core";
 import type { Hono } from "hono";
 import { mountGithubWebhookRoute } from "./github-webhook.js";
 import { readBoundedBody } from "./http-body.js";
+import type { WebhookDeps, WebhookSecretCache } from "./webhook-inbound.js";
 import {
   deliverWebhookEvent,
   formatWebhookPrompt,
   loadWebhookTarget,
   parseWebhookPayload,
   WEBHOOK_MAX_BODY_BYTES,
-  type WebhookDeps,
-  type WebhookSecretCache,
 } from "./webhook-inbound.js";
 
 export {
@@ -60,9 +59,6 @@ export function mountWebhookHttpRoutes(app: Hono, deps: WebhookDeps) {
       return unauthorized();
     }
 
-    const payload = parseWebhookPayload(raw, c.req.header("content-type"));
-    const eventPrompt = formatWebhookPrompt(payload);
-
     const webhookRoutines = await deps.prisma.routine.findMany({
       where: {
         botId: target.bot.id,
@@ -81,12 +77,20 @@ export function mountWebhookHttpRoutes(app: Hono, deps: WebhookDeps) {
       orderBy: { updatedAt: "desc" },
       take: 5,
     });
+    if (webhookRoutines.length === 0) {
+      return c.json({ ok: true, ignored: true });
+    }
 
+    const payload = parseWebhookPayload(raw, c.req.header("content-type"));
+    const eventPrompt = formatWebhookPrompt(payload);
+
+    // A payload id often names the resource, not the delivery, so only byte-identical retries collapse.
     const idempotencyKey =
       c.req.header("idempotency-key")?.trim() ||
       c.req.header("x-idempotency-key")?.trim() ||
-      (typeof payload.id === "string" ? payload.id.trim() : "") ||
-      (typeof payload.event_id === "string" ? payload.event_id.trim() : "") ||
+      c.req.header("webhook-id")?.trim() ||
+      c.req.header("svix-id")?.trim() ||
+      (typeof payload.id === "string" || typeof payload.event_id === "string" ? raw : "") ||
       undefined;
 
     return c.json(

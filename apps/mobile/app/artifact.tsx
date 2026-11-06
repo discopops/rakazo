@@ -1,6 +1,6 @@
 import { ChatMarkdown } from "@rakazo/chat-ui/native";
-import type { ArtifactVersion } from "@rakazo/contracts";
-import { isAttachmentImageMimeType } from "@rakazo/contracts";
+import type { ArtifactVersion, ArtifactWithContent } from "@rakazo/contracts";
+import { artifactPreviewKind } from "@rakazo/contracts";
 import type { File } from "expo-file-system";
 import { useLocalSearchParams, useNavigation, useRouter } from "expo-router";
 import type { ReactNode } from "react";
@@ -9,6 +9,7 @@ import {
   ActivityIndicator,
   Alert,
   Image,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -16,11 +17,12 @@ import {
   View,
 } from "react-native";
 import { NativeSymbol } from "../components/native-symbol";
+import { PdfPreview } from "../components/pdf-preview";
 import { SandboxedHtmlPreview } from "../components/sandboxed-html-preview";
+import { VideoPreview } from "../components/video-preview";
 import { formatActivityRelativeTime } from "../lib/activity";
 import { mobileTokens } from "../lib/appearance";
 import { shareLocalFile, writeArtifactCacheFile } from "../lib/artifact-open";
-import type { MobileArtifactWithContent } from "../lib/artifacts";
 import {
   artifactThreadTarget,
   getArtifactById,
@@ -32,28 +34,52 @@ import { t, useI18n } from "../lib/i18n";
 import { presentMessageActionSheet } from "../lib/message-action-sheet";
 import { native, useResolvedAppearance, useThemedStyles } from "../lib/native";
 import { iosAtLeast } from "../lib/native-controls";
+import { useSideInsets } from "../lib/side-insets";
 import { errorText } from "../lib/user-error";
 
 type PreviewContent =
   | { kind: "html"; html: string }
   | { kind: "markdown"; text: string }
+  | { kind: "text"; text: string }
+  | { kind: "pdf"; uri: string }
   | { kind: "image"; uri: string }
+  | { kind: "video"; uri: string }
   | { kind: "unsupported" };
 
 type ContentState =
   | { status: "loading" }
   | { status: "error"; message: string }
-  | { status: "ready"; artifact: MobileArtifactWithContent; file: File; preview: PreviewContent };
+  | { status: "ready"; artifact: ArtifactWithContent; file: File; preview: PreviewContent };
+
+/** Past this a plain-text view gets slow to lay out; share the file to read the rest. */
+const TEXT_PREVIEW_LIMIT = 100_000;
 
 async function computePreview(mimeType: string, file: File): Promise<PreviewContent> {
-  if (mimeType === "text/html") return { kind: "html", html: await file.text() };
-  if (mimeType === "text/markdown") return { kind: "markdown", text: await file.text() };
-  if (isAttachmentImageMimeType(mimeType)) return { kind: "image", uri: file.uri };
-  return { kind: "unsupported" };
+  switch (artifactPreviewKind(mimeType)) {
+    case "html":
+      return { kind: "html", html: await file.text() };
+    case "markdown":
+      return { kind: "markdown", text: await file.text() };
+    case "text": {
+      const text = await file.text();
+      return {
+        kind: "text",
+        text: text.length > TEXT_PREVIEW_LIMIT ? `${text.slice(0, TEXT_PREVIEW_LIMIT)}\n…` : text,
+      };
+    }
+    case "pdf":
+      return { kind: "pdf", uri: file.uri };
+    case "image":
+      return { kind: "image", uri: file.uri };
+    case "video":
+      return { kind: "video", uri: file.uri };
+    case "none":
+      return { kind: "unsupported" };
+  }
 }
 
 export default function ArtifactDetailScreen() {
-  const { artifactId } = useLocalSearchParams<{ artifactId: string }>();
+  const { artifactId, exact } = useLocalSearchParams<{ artifactId: string; exact?: string }>();
   const navigation = useNavigation();
   const router = useRouter();
   const headerInset = useFloatingHeaderInset();
@@ -73,7 +99,9 @@ export default function ArtifactDetailScreen() {
       .then((list) => {
         if (cancelled) return;
         setVersions(list);
-        setSelectedVersionId(list[0]?.id ?? artifactId);
+        // A chat attachment opens its own version; the Files list opens the newest.
+        const attached = exact === "1" && list.some((version) => version.id === artifactId);
+        setSelectedVersionId(attached ? artifactId : (list[0]?.id ?? artifactId));
       })
       .catch(() => {
         if (!cancelled) setSelectedVersionId(artifactId);
@@ -81,7 +109,7 @@ export default function ArtifactDetailScreen() {
     return () => {
       cancelled = true;
     };
-  }, [artifactId]);
+  }, [artifactId, exact]);
 
   useEffect(() => {
     if (!selectedVersionId) return;
@@ -154,11 +182,12 @@ export default function ArtifactDetailScreen() {
     if (!versions || versions.length < 2) return;
     presentMessageActionSheet({
       title: t("Versions"),
+      selected: versions.findIndex((version) => version.id === selectedVersionId),
       cancel: t("Cancel"),
       more: t("More"),
       colorScheme,
       actions: versions.map((version) => ({
-        text: `v${version.version} · ${formatActivityRelativeTime(version.createdAt)}`,
+        text: `v${version.version} (${formatActivityRelativeTime(version.createdAt)})`,
         onPress: () => setSelectedVersionId(version.id),
       })),
     });
@@ -175,7 +204,7 @@ export default function ArtifactDetailScreen() {
 
   useLayoutEffect(() => {
     navigation.setOptions({
-      title: content.status === "ready" ? content.artifact.name : t("Loading…"),
+      title: content.status === "ready" ? content.artifact.name : "",
       headerRight: () =>
         content.status === "ready" ? (
           <View style={styles.headerActions}>
@@ -227,13 +256,15 @@ export default function ArtifactDetailScreen() {
     });
   }, [confirmDelete, content, navigation, share, styles, t]);
 
-  const scrolling = content.status === "ready" && content.preview.kind === "markdown";
+  const scrolling =
+    content.status === "ready" &&
+    (content.preview.kind === "markdown" || content.preview.kind === "text");
   const versionPicker =
     content.status === "ready" && versions && versions.length > 1 ? (
       <View style={styles.pillRow}>
         <Pressable accessibilityRole="button" onPress={pickVersion} style={styles.pill}>
           <Text style={styles.pillText}>
-            {`v${content.artifact.version} · ${formatActivityRelativeTime(content.artifact.createdAt)}`}
+            {`v${content.artifact.version} (${formatActivityRelativeTime(content.artifact.createdAt)})`}
           </Text>
           <NativeSymbol
             ios="chevron.down"
@@ -261,7 +292,7 @@ export default function ArtifactDetailScreen() {
           <ArtifactPreview
             preview={content.preview}
             scrollHeader={scrolling ? versionPicker : undefined}
-            imageLabel={content.artifact.name}
+            name={content.artifact.name}
             onOpenImage={openImage}
           />
         )}
@@ -273,14 +304,15 @@ export default function ArtifactDetailScreen() {
 function ArtifactPreview({
   preview,
   scrollHeader,
-  imageLabel,
+  name,
   onOpenImage,
 }: {
   preview: PreviewContent;
   scrollHeader?: ReactNode;
-  imageLabel: string;
+  name: string;
   onOpenImage: (() => void) | null;
 }) {
+  const sideInsets = useSideInsets();
   const styles = useThemedStyles(createStyles);
   const tokens = mobileTokens();
   const colorScheme = useResolvedAppearance();
@@ -294,6 +326,7 @@ function ArtifactPreview({
   if (preview.kind === "markdown") {
     return (
       <ScrollView
+        style={sideInsets}
         contentContainerStyle={styles.markdownScroll}
         contentInsetAdjustmentBehavior="automatic"
       >
@@ -304,11 +337,39 @@ function ArtifactPreview({
       </ScrollView>
     );
   }
+  if (preview.kind === "text") {
+    return (
+      <ScrollView
+        style={sideInsets}
+        contentContainerStyle={styles.markdownScroll}
+        contentInsetAdjustmentBehavior="automatic"
+      >
+        {scrollHeader}
+        <Text selectable style={styles.plainText}>
+          {preview.text}
+        </Text>
+      </ScrollView>
+    );
+  }
+  if (preview.kind === "pdf") {
+    return (
+      <View style={styles.previewCard}>
+        <PdfPreview uri={preview.uri} name={name} />
+      </View>
+    );
+  }
+  if (preview.kind === "video") {
+    return (
+      <View style={styles.previewCard}>
+        <VideoPreview uri={preview.uri} name={name} />
+      </View>
+    );
+  }
   if (preview.kind === "image") {
     return (
       <Pressable
         accessibilityRole="imagebutton"
-        accessibilityLabel={imageLabel}
+        accessibilityLabel={name}
         disabled={!onOpenImage}
         onPress={onOpenImage ?? undefined}
         style={styles.imageWrap}
@@ -346,6 +407,12 @@ function createStyles() {
     errorText: { color: native.secondaryLabel, fontSize: 14, textAlign: "center" },
     previewCard: { flex: 1, borderRadius: 18, overflow: "hidden" },
     markdownScroll: { padding: 20 },
+    plainText: {
+      color: native.label,
+      fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }),
+      fontSize: 13,
+      lineHeight: 19,
+    },
     imageWrap: {
       flex: 1,
       alignItems: "center",

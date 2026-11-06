@@ -7,6 +7,8 @@ import {
   createOwnedArtifact,
   deleteArtifactFamily,
   listSpaceArtifacts,
+  resolveGroupSendAttachments,
+  resolveSendAttachments,
   storeInboundAttachment,
 } from "./artifacts.js";
 
@@ -383,6 +385,33 @@ describe("deleteArtifactFamily", () => {
 });
 
 describe("configured artifact upload limit", () => {
+  it("normalizes uploads before validation/storage", async () => {
+    const reachedStorage = new Error("reached storage");
+    const put = vi.fn().mockRejectedValue(reachedStorage);
+    const deps = { prisma: {} as PrismaClient, artifacts: { put } as unknown as ArtifactStore };
+    await expect(
+      createOwnedArtifact(deps, actor, {
+        botId: "bot-1",
+        name: "song.m4a",
+        mimeType: "audio/aac",
+        contentBase64: "YXVkaW8=",
+      }),
+    ).rejects.toBe(reachedStorage);
+    expect(put).toHaveBeenCalledWith(
+      expect.objectContaining({ mimeType: "audio/mp4" }),
+      expect.anything(),
+    );
+    put.mockClear();
+    await expect(
+      createOwnedArtifact(deps, actor, {
+        botId: "bot-1",
+        name: "song.flac",
+        mimeType: "audio/flac",
+        contentBase64: "YXVkaW8=",
+      }),
+    ).rejects.toThrow("Unsupported attachment type");
+    expect(put).not.toHaveBeenCalled();
+  });
   it("rejects oversized attachments before storage and accepts uploads above the old cap", async () => {
     const stored = new Error("reached storage");
     const put = vi.fn().mockRejectedValue(stored);
@@ -415,9 +444,17 @@ describe("storeInboundAttachment", () => {
       artifacts: { put } as unknown as ArtifactStore,
       maxUploadSizeBytes: 8,
     };
-    const store = (attachment: Parameters<typeof storeInboundAttachment>[2]["attachment"]) =>
-      storeInboundAttachment(deps, actor, { botId: "bot-1", attachment, clientNonce: "nonce-1" });
-    return { put, store };
+    const store = (
+      attachment: Parameters<typeof storeInboundAttachment>[2]["attachment"],
+      downloadDeadline?: number,
+    ) =>
+      storeInboundAttachment(deps, actor, {
+        botId: "bot-1",
+        attachment,
+        clientNonce: "nonce-1",
+        downloadDeadline,
+      });
+    return { put, store, findFirst };
   }
 
   it("bounds a stalled download and does not store its late result", async () => {
@@ -441,6 +478,16 @@ describe("storeInboundAttachment", () => {
     }
   });
 
+  it("does not start another download after the shared deadline", async () => {
+    const { put, store } = setup();
+    const fetch = vi.fn(async () => new Uint8Array(3));
+    await expect(
+      store({ name: "a.png", mimeType: "image/png", fetch }, Date.now() - 1),
+    ).rejects.toThrow("Attachment download timed out");
+    expect(fetch).not.toHaveBeenCalled();
+    expect(put).not.toHaveBeenCalled();
+  });
+
   it("skips the download when the platform reports an oversize file", async () => {
     const { put, store } = setup();
     const fetch = vi.fn(async () => new Uint8Array(4));
@@ -449,6 +496,18 @@ describe("storeInboundAttachment", () => {
     );
     expect(fetch).not.toHaveBeenCalled();
     expect(put).not.toHaveBeenCalled();
+  });
+
+  it("stores a CSV that a chat platform labelled as Excel as CSV", async () => {
+    const { put, store } = setup();
+    const fetch = vi.fn(async () => new Uint8Array(4));
+    await expect(
+      store({ name: "sales.csv", mimeType: "application/vnd.ms-excel", fetch }),
+    ).rejects.toBe(reachedStorage);
+    expect(put).toHaveBeenCalledWith(
+      expect.objectContaining({ mimeType: "text/csv" }),
+      expect.anything(),
+    );
   });
 
   it("rejects unsupported types and oversize downloads before storage", async () => {
@@ -466,7 +525,7 @@ describe("storeInboundAttachment", () => {
   });
 
   it("reuses the artifact an earlier delivery of the same file stored", async () => {
-    const { put, store } = setup({
+    const { put, store, findFirst } = setup({
       id: "artifact-1",
       botId: "bot-1",
       groupId: null,
@@ -479,10 +538,84 @@ describe("storeInboundAttachment", () => {
       createdAt: new Date("2026-10-01T00:00:00.000Z"),
     });
     const fetch = vi.fn(async () => new Uint8Array(3));
-    await expect(store({ name: "a.png", mimeType: "image/png", fetch })).resolves.toMatchObject({
+    const replayed = await store({ name: "a.png", mimeType: "image/png", fetch }, Date.now() - 1);
+    expect(replayed).toMatchObject({
       id: "artifact-1",
+    });
+    expect(replayed.bytes).toBeUndefined();
+    expect(findFirst).toHaveBeenCalledWith({
+      where: { spaceId: actor.spaceId, userId: actor.userId, clientNonce: "nonce-1" },
     });
     expect(fetch).not.toHaveBeenCalled();
     expect(put).not.toHaveBeenCalled();
+  });
+
+  it("returns the downloaded bytes with a freshly stored artifact", async () => {
+    const bytes = new Uint8Array([7, 8, 9]);
+    const row = {
+      id: "artifact-9",
+      botId: "bot-1",
+      groupId: null,
+      runId: null,
+      name: "voice.oga",
+      description: null,
+      mimeType: "audio/ogg",
+      size: bytes.byteLength,
+      version: 1,
+      createdAt: new Date(0),
+    };
+    const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      artifact: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        create: vi.fn().mockResolvedValue(row),
+      },
+    };
+    const deps = {
+      prisma: {
+        artifact: { findFirst: vi.fn().mockResolvedValue(null) },
+        $transaction: vi.fn(async (fn: (t: unknown) => Promise<unknown>) => fn(tx)),
+      } as unknown as PrismaClient,
+      artifacts: { put: vi.fn().mockResolvedValue({ id: "store-1" }) } as unknown as ArtifactStore,
+    };
+    const stored = await storeInboundAttachment(deps, actor, {
+      botId: "bot-1",
+      attachment: { name: "voice.oga", mimeType: "audio/ogg", fetch: async () => bytes },
+      clientNonce: "nonce-2",
+    });
+    expect(stored).toMatchObject({ id: "artifact-9", mimeType: "audio/ogg" });
+    expect(stored.bytes).toBe(bytes);
+  });
+});
+
+describe("send attachment count", () => {
+  it.each(["bot", "group"])("enforces the deployment limit for %s attachments", async (target) => {
+    const findMany = vi.fn().mockImplementation(async ({ where }) =>
+      where.id.in.map((id: string) => ({
+        id,
+        name: `${id}.txt`,
+        mimeType: "text/plain",
+        size: 1,
+        storageKey: id,
+      })),
+    );
+    const prisma = { artifact: { findMany } } as unknown as PrismaClient;
+    const send = (maxAttachmentsPerMessage: number | undefined, count: number) => {
+      const deps = { prisma, maxAttachmentsPerMessage };
+      const ids = Array.from({ length: count }, (_, i) => `artifact-${i}`);
+      return target === "bot"
+        ? resolveSendAttachments(deps, actor, "bot-1", ids)
+        : resolveGroupSendAttachments(deps, actor, "group-1", ["bot-1"], ids);
+    };
+    for (const limit of [undefined, 1, 8, 100]) {
+      findMany.mockClear();
+      const effective = limit ?? 4;
+      await expect(send(limit, effective + 1)).rejects.toThrow(
+        `At most ${effective} attachments per message`,
+      );
+      expect(findMany).not.toHaveBeenCalled();
+      await expect(send(limit, effective)).resolves.toMatchObject({ blocks: expect.any(Array) });
+      expect(findMany).toHaveBeenCalledOnce();
+    }
   });
 });

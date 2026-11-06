@@ -1,5 +1,6 @@
 import type { Criterion } from "./cases.js";
 import type { DiagnosticToolObservation, HistoryDiagnostic } from "./history-observer.js";
+import type { Judgment } from "./judge.js";
 import type { CacheDecisionMeasurement, Operation } from "./measurement.js";
 import { OPERATION_KINDS, summarizeCacheDecisions } from "./measurement.js";
 import type { measureWorkflowSteps } from "./step-accounting.js";
@@ -15,6 +16,8 @@ export type TrialResult = {
   historyDiagnostics?: HistoryDiagnostic[];
   toolLoopDiagnostics?: DiagnosticToolObservation[];
   wireDiagnostics?: DiagnosticWireObservation[];
+  /** Largest tool list offered on a run's first model call. */
+  offeredTools?: { count: number; bytes: number };
   backgroundFailures?: Record<string, number>;
   historyPreparationState?: {
     beforeCursor: number | null;
@@ -27,6 +30,7 @@ export type TrialResult = {
   category: FailureCategory | null;
   reason: string | null;
   criteria: Criterion[];
+  judgment?: Judgment;
   assisted: false;
   cleanupFailed: boolean;
   latencyMs: number;

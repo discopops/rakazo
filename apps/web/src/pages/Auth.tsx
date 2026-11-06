@@ -1,49 +1,71 @@
 import { Trans, useLingui } from "@lingui/react/macro";
-import { credentialIssue, signupRequiresEmailVerification } from "@rakazo/core";
-import { Button, Input, Label } from "@rakazo/ui-web";
-import { useEffect, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import {
+  credentialIssue,
+  MAX_PASSWORD_LENGTH,
+  MIN_PASSWORD_LENGTH,
+  signupRequiresEmailVerification,
+  suggestEmailCorrection,
+} from "@rakazo/core";
+import { Button, Input, InputOTP, InputOTPGroup, InputOTPSlot, Label } from "@rakazo/ui-web";
+import { Server } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import { IconTooltip } from "../components/IconTooltip";
+import { PasskeySignIn } from "../components/PasskeySignIn";
 import { authClient } from "../lib/auth";
 import type { AuthCapabilities } from "../lib/auth-capabilities";
 import { fetchAuthCapabilities } from "../lib/auth-capabilities";
+import { desktopBridge } from "../lib/desktop";
 import { clearSpaceSelection } from "../lib/rpc";
 import { runSsoFlow } from "../lib/sso-flow";
 import { authErrorText, credentialIssueText } from "../lib/user-error";
+import { WindowChrome } from "./WindowChrome";
 
 type AuthMode = "in" | "up" | "forgot";
 
 const fieldClass = "mt-2 h-12 rounded-xl px-4 text-base md:text-base";
+const CODE_LENGTH = 6;
 export const submitClass = "mt-3 h-12 w-full rounded-xl text-base";
 
 export function AuthPage({ mode }: { mode: AuthMode }) {
   const { t } = useLingui();
-  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
+  const [emailBlurred, setEmailBlurred] = useState(false);
+  const [warnedEmail, setWarnedEmail] = useState<string | null>(null);
+  const emailSuggestion = mode === "up" ? suggestEmailCorrection(email) : null;
   const [error, setError] = useState<string | null>(() => {
     const code = searchParams.get("error");
     if (!code) return null;
     return authErrorText({ code }, t`Could not continue`);
   });
   const [pending, setPending] = useState(false);
+  const entering = useRef(false);
   const [resetSent, setResetSent] = useState(false);
   // Signup triggers a session refresh that remounts the anonymous auth page.
   const sent = resetSent || searchParams.get("verify") === "email";
   const [reset, setReset] = useState<AuthCapabilities | null>(null);
   const [capabilityError, setCapabilityError] = useState(false);
   const [capabilityAttempt, setCapabilityAttempt] = useState(0);
+  const [codeSent, setCodeSent] = useState(false);
+  const [code, setCode] = useState("");
+  const useCode = Boolean(reset?.passwordAuth && reset.emailCode) && mode !== "forgot";
+  // A blank password asks for an emailed code, so code-only accounts need no toggle.
+  const codeMode = useCode && !password;
+  const codeStep = useCode && codeSent;
   const passwordFieldId = mode === "in" ? "current-password" : "new-password";
-  const title = sent ? (
-    <Trans>Check your email</Trans>
-  ) : mode === "in" ? (
-    <Trans>Sign in to Rakazo</Trans>
-  ) : mode === "up" ? (
-    <Trans>Create your Rakazo</Trans>
-  ) : (
-    <Trans>Reset your password</Trans>
-  );
+  const title =
+    sent || codeStep ? (
+      <Trans>Check your email</Trans>
+    ) : mode === "in" ? (
+      <Trans>Sign in to Rakazo</Trans>
+    ) : mode === "up" ? (
+      <Trans>Create your Rakazo</Trans>
+    ) : (
+      <Trans>Reset your password</Trans>
+    );
 
   useEffect(() => {
     setReset(null);
@@ -68,9 +90,22 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!reset?.passwordAuth) return;
-    const issue = credentialIssue({ email, password: mode === "forgot" ? undefined : password });
+    if (codeStep) {
+      // An unfinished code would spend one of the code's three attempts.
+      if (code.length === CODE_LENGTH) await verifyCode(code);
+      return;
+    }
+    const issue = credentialIssue({
+      email,
+      password: mode === "forgot" || codeMode ? undefined : password,
+    });
     if (issue) {
       setError(credentialIssueText(issue));
+      return;
+    }
+    if (emailSuggestion && warnedEmail !== email) {
+      setWarnedEmail(email);
+      setEmailBlurred(true);
       return;
     }
     setPending(true);
@@ -93,6 +128,19 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
         return;
       }
       const trimmedEmail = email.trim();
+      if (codeMode) {
+        const request = await authClient.emailOtp.sendVerificationOtp({
+          email: trimmedEmail,
+          type: "sign-in",
+        });
+        if (request.error) {
+          setError(authErrorText(request.error, t`Could not continue`));
+          return;
+        }
+        setCode("");
+        setCodeSent(true);
+        return;
+      }
       const result =
         mode === "up"
           ? await authClient.signUp.email({
@@ -109,19 +157,51 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
         setSearchParams({ verify: "email" });
         return;
       }
-      clearSpaceSelection();
-      navigate(
-        mode === "up"
-          ? "/onboarding"
-          : searchParams.get("next") === "/integrations/setup"
-            ? "/integrations/setup"
-            : "/app",
-      );
+      enterApp();
     } catch {
       setError(t`Could not reach the server`);
     } finally {
-      setPending(false);
+      if (!entering.current) setPending(false);
     }
+  }
+
+  async function verifyCode(otp: string) {
+    if (pending) return;
+    setPending(true);
+    setError(null);
+    try {
+      const trimmedEmail = email.trim();
+      const result = await authClient.signIn.emailOtp({
+        email: trimmedEmail,
+        otp,
+        // Only used when this creates the account.
+        name: mode === "up" ? name || trimmedEmail.split("@")[0] || "User" : undefined,
+      });
+      if (result.error) {
+        setError(authErrorText(result.error, t`Could not continue`));
+        setCode("");
+        return;
+      }
+      enterApp();
+    } catch {
+      setError(t`Could not reach the server`);
+    } finally {
+      if (!entering.current) setPending(false);
+    }
+  }
+
+  function enterApp() {
+    clearSpaceSelection();
+    // The routes move a signed-in user on once the session refetch lands. Navigating
+    // first beats it, so the guards bounce through sign-in and the shell.
+    entering.current = true;
+    setPending(true);
+  }
+
+  function leaveCodeStep() {
+    setCodeSent(false);
+    setCode("");
+    setError(null);
   }
 
   async function signInWithSso() {
@@ -144,6 +224,10 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
     } catch {
       setError(t`Could not continue`);
     }
+  }
+
+  if (!sent && !reset && !capabilityError) {
+    return <div className="h-full bg-background" />;
   }
 
   return (
@@ -169,10 +253,6 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
                 <Trans>Retry</Trans>
               </Button>
             </div>
-          ) : !reset ? (
-            <p role="status">
-              <Trans>Loading…</Trans>
-            </p>
           ) : null}
           {reset?.sso && !reset.passwordAuth && mode !== "forgot" ? (
             <Button
@@ -191,7 +271,7 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
           ) : null}
           {reset?.passwordAuth ? (
             <>
-              {mode === "up" ? (
+              {mode === "up" && !codeStep ? (
                 <div className="mb-4 w-full">
                   <Label htmlFor="name" className="text-muted-foreground">
                     <Trans>Name</Trans>
@@ -207,23 +287,68 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
                   />
                 </div>
               ) : null}
-              <div className="w-full">
-                <Label htmlFor="email" className="text-muted-foreground">
-                  <Trans>Email</Trans>
-                </Label>
-                <Input
-                  id="email"
-                  name="email"
-                  autoComplete="username"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder={t`Your email address`}
-                  type="email"
-                  required
-                  className={fieldClass}
-                />
-              </div>
-              {mode !== "forgot" ? (
+              {codeStep ? (
+                <div className="flex w-full justify-center">
+                  <InputOTP
+                    aria-label={t({ message: "Code", context: "email sign-in" })}
+                    maxLength={CODE_LENGTH}
+                    pattern={"^\\d+$"}
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    autoFocus
+                    value={code}
+                    onChange={setCode}
+                    onComplete={(value: string) => void verifyCode(value)}
+                  >
+                    <InputOTPGroup>
+                      {[0, 1, 2, 3, 4, 5].map((index) => (
+                        <InputOTPSlot
+                          key={index}
+                          index={index}
+                          className="size-12 text-lg first:rounded-l-xl last:rounded-r-xl"
+                        />
+                      ))}
+                    </InputOTPGroup>
+                  </InputOTP>
+                </div>
+              ) : (
+                <div className="w-full">
+                  <Label htmlFor="email" className="text-muted-foreground">
+                    <Trans>Email</Trans>
+                  </Label>
+                  <Input
+                    id="email"
+                    name="email"
+                    autoComplete={mode === "in" ? "username webauthn" : "username"}
+                    value={email}
+                    onChange={(e) => {
+                      setEmail(e.target.value);
+                      setEmailBlurred(false);
+                    }}
+                    onBlur={() => setEmailBlurred(true)}
+                    placeholder={t`Your email address`}
+                    type="email"
+                    required
+                    className={fieldClass}
+                  />
+                  {emailSuggestion && emailBlurred ? (
+                    <p role="status" className="mt-2 text-sm text-warning">
+                      <Trans>
+                        Did you mean{" "}
+                        <button
+                          type="button"
+                          className="font-medium underline"
+                          onClick={() => setEmail(emailSuggestion)}
+                        >
+                          {emailSuggestion}
+                        </button>
+                        ?
+                      </Trans>
+                    </p>
+                  ) : null}
+                </div>
+              )}
+              {mode !== "forgot" && !codeStep ? (
                 <div className="mt-4 w-full">
                   <Label htmlFor={passwordFieldId} className="text-muted-foreground">
                     <Trans>Password</Trans>
@@ -236,8 +361,9 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder={t`Password`}
                     type="password"
-                    required
-                    minLength={8}
+                    required={!useCode}
+                    minLength={mode === "up" ? MIN_PASSWORD_LENGTH : undefined}
+                    maxLength={MAX_PASSWORD_LENGTH}
                     className={fieldClass}
                   />
                   {mode === "in" && reset?.passwordReset ? (
@@ -254,18 +380,45 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
                   {error}
                 </p>
               ) : null}
-              <Button type="submit" size="lg" disabled={pending} className={submitClass}>
+              <Button
+                type="submit"
+                size="lg"
+                disabled={pending || (codeStep && code.length < CODE_LENGTH)}
+                className={submitClass}
+              >
                 {pending ? (
                   <Trans>Working…</Trans>
+                ) : codeMode ? (
+                  <Trans>Continue</Trans>
                 ) : mode === "in" ? (
-                  <Trans>Continue with email</Trans>
+                  <Trans>Sign in</Trans>
                 ) : mode === "forgot" ? (
                   <Trans>Send reset link</Trans>
                 ) : (
                   <Trans>Create account</Trans>
                 )}
               </Button>
-              {reset.sso && mode !== "forgot" ? (
+              {mode === "in" && !codeStep ? (
+                <PasskeySignIn
+                  disabled={pending}
+                  className={submitClass}
+                  onSignedIn={enterApp}
+                  onError={setError}
+                />
+              ) : null}
+              {codeStep ? (
+                <Button
+                  type="button"
+                  variant="link"
+                  size="sm"
+                  disabled={pending}
+                  className="mt-3 text-muted-foreground"
+                  onClick={leaveCodeStep}
+                >
+                  <Trans>Back</Trans>
+                </Button>
+              ) : null}
+              {reset.sso && mode !== "forgot" && !codeStep ? (
                 <Button
                   type="button"
                   variant="link"
@@ -277,27 +430,29 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
                   <Trans>Continue with {reset.sso.name}</Trans>
                 </Button>
               ) : null}
-              <p className="mt-8 text-muted-foreground">
-                {mode === "in" ? (
-                  <>
-                    <Trans>Don’t have an account?</Trans>{" "}
-                    <Link to="/sign-up" className="font-medium text-foreground">
-                      <Trans>Sign up</Trans>
-                    </Link>
-                  </>
-                ) : mode === "up" ? (
-                  <>
-                    <Trans>Already have an account?</Trans>{" "}
+              {codeStep ? null : (
+                <p className="mt-8 text-muted-foreground">
+                  {mode === "in" ? (
+                    <>
+                      <Trans>Don’t have an account?</Trans>{" "}
+                      <Link to="/sign-up" className="font-medium text-foreground">
+                        <Trans>Sign up</Trans>
+                      </Link>
+                    </>
+                  ) : mode === "up" ? (
+                    <>
+                      <Trans>Already have an account?</Trans>{" "}
+                      <Link to="/sign-in" className="font-medium text-foreground">
+                        <Trans>Sign in</Trans>
+                      </Link>
+                    </>
+                  ) : (
                     <Link to="/sign-in" className="font-medium text-foreground">
-                      <Trans>Sign in</Trans>
+                      <Trans>Back to sign in</Trans>
                     </Link>
-                  </>
-                ) : (
-                  <Link to="/sign-in" className="font-medium text-foreground">
-                    <Trans>Back to sign in</Trans>
-                  </Link>
-                )}
-              </p>
+                  )}
+                </p>
+              )}
             </>
           ) : null}
         </>
@@ -398,18 +553,42 @@ export function AuthFrame({
   onSubmit: (event: React.FormEvent) => void;
   children: React.ReactNode;
 }) {
+  const { t } = useLingui();
+  const server = desktopBridge()?.server;
   return (
-    <div className="flex min-h-full items-center justify-center bg-background px-6 py-16 text-foreground">
-      <form onSubmit={onSubmit} className="flex w-[460px] flex-col items-center">
-        <div className="flex h-[74px] w-[74px] items-center justify-center gap-[11px] rounded-full bg-muted">
-          <span className="h-5 w-[9px] rounded-full bg-primary" />
-          <span className="h-5 w-[9px] rounded-full bg-primary" />
-        </div>
-        <h1 aria-live="polite" className="mb-9 mt-7 text-4xl font-medium tracking-tight">
-          {title}
-        </h1>
-        {children}
-      </form>
+    <div
+      className="flex min-h-full flex-col bg-background text-foreground"
+      data-rakazo-surface="auth"
+    >
+      <div className="app-drag flex items-center gap-2 px-5 py-[18px]">
+        <WindowChrome />
+        {server ? (
+          <IconTooltip label={t`Change server`}>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              aria-label={t`Change server`}
+              className="app-no-drag ml-auto text-muted-foreground"
+              onClick={() => void server.change()}
+            >
+              <Server />
+            </Button>
+          </IconTooltip>
+        ) : null}
+      </div>
+      <div className="flex flex-1 items-center justify-center px-6 pb-16">
+        <form onSubmit={onSubmit} className="flex w-full max-w-[460px] flex-col items-center">
+          <div className="flex h-[74px] w-[74px] items-center justify-center gap-[11px] rounded-full bg-muted">
+            <span className="h-5 w-[9px] rounded-full bg-primary" />
+            <span className="h-5 w-[9px] rounded-full bg-primary" />
+          </div>
+          <h1 aria-live="polite" className="mb-9 mt-7 text-4xl font-medium tracking-tight">
+            {title}
+          </h1>
+          {children}
+        </form>
+      </div>
     </div>
   );
 }
@@ -438,7 +617,8 @@ function PasswordField({
         autoComplete="new-password"
         type="password"
         required
-        minLength={8}
+        minLength={MIN_PASSWORD_LENGTH}
+        maxLength={MAX_PASSWORD_LENGTH}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         className={fieldClass}

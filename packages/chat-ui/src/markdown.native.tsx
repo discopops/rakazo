@@ -1,5 +1,5 @@
 import type { ColorTokens, ResolvedAppearance } from "@rakazo/ui-tokens";
-import { darkTokens } from "@rakazo/ui-tokens";
+import { darkTokens, fontWeight, MAX_FONT_SCALE, pageIconBars, typeScale } from "@rakazo/ui-tokens";
 import type {
   ASTNode,
   MarkdownStyleMap,
@@ -8,17 +8,23 @@ import type {
 import Markdown, {
   createMarkdownIt,
   FitImage,
+  renderRules as libraryRenderRules,
   MarkdownStream,
 } from "@ronradtke/react-native-markdown-display";
-import type { ReactNode } from "react";
-import { createContext, memo, useCallback, useContext, useMemo, useState } from "react";
-import type {
-  NativeScrollEvent,
-  NativeSyntheticEvent,
-  StyleProp,
-  TextStyle,
-  ViewStyle,
-} from "react-native";
+import { Highlight, themes } from "prism-react-renderer";
+import type { ComponentType, ReactNode } from "react";
+import {
+  createContext,
+  Fragment,
+  memo,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import type { GestureResponderEvent, StyleProp, TextStyle, ViewStyle } from "react-native";
 import {
   Alert,
   I18nManager,
@@ -29,17 +35,22 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from "react-native";
 import type { ChatMarkdownProps } from "./markdown";
 import {
   inlineMarkdownImageSrc,
+  isProseFence,
   LinkFaviconsContext,
   LinkFaviconsPausedContext,
   linkFaviconOrigin,
   linkifyExplicitUrls,
   linkLabel,
-  markdownLinkRequiresConfirmation,
+  markdownLinkNeedsPrompt,
+  markdownLinkSite,
+  markdownMentionId,
+  markdownPageId,
   markRemoteImageLoaded,
   plainTextLinkParts,
   RemoteImagesContext,
@@ -49,17 +60,46 @@ import {
   useLinkFavicon,
 } from "./markdown";
 
-import { useMarkdownLinkAppOrigin, useMarkdownLinkCopy } from "./markdown-link-prompt";
+import {
+  useMarkdownLinkAppOrigin,
+  useMarkdownLinkCopy,
+  useMarkdownLinkTrust,
+} from "./markdown-link-prompt";
+import { isMermaidFence } from "./mermaid";
+import { PAGE_ICON } from "./page-icon";
 
 function keepMarkdownLinkToken(_url: string) {
   return true;
 }
 
-const BLOCK_GAP = 10;
-const BODY_FONT_SIZE = 15.5;
+const BLOCK_GAP = 8;
+const BODY_FONT_SIZE = typeScale.body.fontSize;
+// "ui-monospace" is iOS's own monospaced system font, SF Mono.
+const MONO_FONT = Platform.select({ ios: "ui-monospace", default: "monospace" });
+const BULLET_SIZE = 5;
+// List markers sit in an 18 pt column, 8 pt before the item text.
+const MARKER_COLUMN = 18;
+const TASK_BOX_SIZE = 14;
+const MARKER_GAP = 8;
+// Advances at the list-number size (15 pt): a tabular digit, and the "." or ")" after it.
+const NUMBER_DIGIT_WIDTH = 9.6;
+const NUMBER_MARK_WIDTH = { ".": 4.1, ")": 5.6 };
+
+/**
+ * Wide enough for the list's longest number at the current text size, so every item's text
+ * starts at the same place.
+ */
+function numberColumnWidth(list: ASTNode, markup: string, fontScale: number) {
+  const start = Number(list.attributes?.start);
+  const last = (Number.isFinite(start) ? start : 1) + list.children.length - 1;
+  const digits = String(Math.max(1, last)).length;
+  const mark = markup === ")" ? NUMBER_MARK_WIDTH[")"] : NUMBER_MARK_WIDTH["."];
+  return Math.max(MARKER_COLUMN, Math.ceil((digits * NUMBER_DIGIT_WIDTH + mark) * fontScale));
+}
 const LINK_TILE_SIZE = 18;
 // Keeps the site icon on the line of the label's first word.
 const WORD_JOINER = "\u2060";
+const ZERO_WIDTH_SPACE = "\u200B";
 // First-strong isolate and its pop: a label's own direction characters cannot reorder the text
 // around the link.
 const ISOLATE = "\u2068";
@@ -69,6 +109,60 @@ const POP_ISOLATE = "\u2069";
 const markdownParser = createMarkdownIt();
 markdownParser.validateLink = keepMarkdownLinkToken;
 linkifyExplicitUrls(markdownParser);
+markTaskListItems(markdownParser);
+
+const TASK_MARKER = /^\[([ xX])\]\s+/;
+// The first text token ends at a line break, so its marker may have nothing after it.
+const TASK_MARKER_TOKEN = /^\[([ xX])\](?:\s+|$)/;
+
+/** The parts of a markdown-it token the task list rule reads and writes. */
+type ParsedToken = {
+  type: string;
+  content: string;
+  children: ParsedToken[] | null;
+  attrSet(name: string, value: string): void;
+};
+
+/**
+ * GitHub task lists, as web renders them: a list item starting `[ ]` or `[x]` loses that text
+ * and carries its state, so the list item rule draws a checkbox instead.
+ */
+function markTaskListItems(parser: typeof markdownParser) {
+  parser.core.ruler.after("inline", "task_list_items", (state: { tokens: ParsedToken[] }) => {
+    const tokens = state.tokens;
+    for (let index = 2; index < tokens.length; index += 1) {
+      const inline = tokens[index];
+      const item = tokens[index - 2];
+      if (
+        inline?.type !== "inline" ||
+        tokens[index - 1]?.type !== "paragraph_open" ||
+        item?.type !== "list_item_open"
+      )
+        continue;
+      const first = inline.children?.[0];
+      // Read the source, so an escaped `\[x\]` stays literal text.
+      const match = TASK_MARKER.exec(inline.content);
+      const token = first?.type === "text" ? TASK_MARKER_TOKEN.exec(first.content) : null;
+      if (!first || !match || !token) continue;
+      first.content = first.content.slice(token[0].length);
+      // A marker alone on its line leaves the break that followed it leading the text.
+      if (!first.content && inline.children?.[1]?.type === "softbreak") {
+        inline.children.splice(1, 1);
+      }
+      inline.content = inline.content.replace(TASK_MARKER, "");
+      item.attrSet("data-task", match[1] === " " ? "open" : "done");
+    }
+  });
+}
+
+/** The code of each fenced or indented block in a message, as its copy button copies it. */
+export function markdownCodeBlocks(markdown: string): string[] {
+  const tokens: { type: string; content: string }[] = markdownParser.parse(markdown, {});
+  return tokens
+    .filter((token) => token.type === "fence" || token.type === "code_block")
+    .map((token) => token.content.replace(/\n$/, ""))
+    .filter((code) => /\S/.test(code));
+}
 
 // Hebrew, Arabic and the other right-to-left scripts, with their presentation forms.
 const RTL_LETTER =
@@ -82,12 +176,30 @@ function contraryDirection(text: string) {
   return rtl ? "rtl" : "ltr";
 }
 
+const minorHeading = {
+  ...typeScale.secondary,
+  fontWeight: fontWeight.semibold,
+  marginTop: 0,
+  marginBottom: 0,
+} as const;
+
+const codeText = {
+  fontFamily: MONO_FONT,
+  fontSize: typeScale.caption.fontSize,
+  lineHeight: undefined,
+};
+
+// The library pads code blocks by 10 already.
+const codeBox = {
+  borderWidth: 0,
+  borderRadius: 10,
+};
+
 function markdownStyles(palette: ColorTokens) {
   return StyleSheet.create({
     body: {
       color: palette.foreground,
-      fontSize: BODY_FONT_SIZE,
-      lineHeight: 23,
+      ...typeScale.body,
       width: "100%",
       minWidth: 0,
       flexShrink: 1,
@@ -101,76 +213,118 @@ function markdownStyles(palette: ColorTokens) {
     },
     heading1: {
       color: palette.foreground,
-      fontSize: 21,
-      lineHeight: 27,
+      ...typeScale.title,
       marginTop: 0,
       marginBottom: 0,
     },
     heading2: {
       color: palette.foreground,
-      fontSize: 19,
-      lineHeight: 25,
+      ...typeScale.headline,
       marginTop: 0,
       marginBottom: 0,
     },
     heading3: {
       color: palette.foreground,
-      fontSize: 17,
-      lineHeight: 23,
+      ...typeScale.body,
+      fontWeight: fontWeight.semibold,
       marginTop: 0,
       marginBottom: 0,
     },
+    heading4: minorHeading,
+    heading5: minorHeading,
+    heading6: minorHeading,
     strong: {
       color: palette.foreground,
-      fontWeight: "700",
+      fontWeight: fontWeight.semibold,
     },
     link: {
       color: palette.link,
       textDecorationLine: "underline",
       marginBottom: 0,
     },
+    // Inline code is set in the monospaced font alone, without a chip around it.
     code_inline: {
       color: palette.foreground,
-      backgroundColor: palette.background,
-      borderColor: palette.border,
-      borderWidth: StyleSheet.hairlineWidth,
+      fontFamily: MONO_FONT,
+      fontSize: typeScale.caption.fontSize,
+      backgroundColor: "transparent",
+      borderWidth: 0,
       padding: 0,
-      paddingHorizontal: 4,
-      paddingVertical: 1,
-      borderRadius: 4,
+      borderRadius: 0,
     },
+    // Code blocks keep the monospaced font's own line spacing.
     code_block: {
       color: palette.foreground,
-      backgroundColor: palette.background,
+      backgroundColor: palette.secondary,
       borderColor: palette.border,
+      ...codeText,
+      ...codeBox,
     },
+    // The header and code sit inside the fence; a fill of their own would stack the translucent one.
     fence: {
-      backgroundColor: palette.background,
+      backgroundColor: palette.secondary,
       borderColor: palette.border,
+      ...codeBox,
     },
     fence_code: {
-      backgroundColor: palette.background,
+      backgroundColor: "transparent",
     },
-    // Bot bubbles are filled with `muted`, which `border` matches in light mode,
-    // so rules drawn inside a message use the muted foreground to stay visible.
+    fence_header: {
+      backgroundColor: "transparent",
+      borderBottomColor: palette.border,
+    },
+    fence_token: codeText,
+    // Prose in a fence reads in the body font, not the monospaced one.
+    fence_prose: {
+      color: palette.foreground,
+      ...typeScale.body,
+    },
+    fence_language_label: {
+      color: palette.foreground,
+      fontFamily: MONO_FONT,
+    },
     blockquote: {
       backgroundColor: "transparent",
-      borderLeftColor: palette.mutedForeground,
+      color: palette.mutedForeground,
+      borderLeftColor: palette.faintForeground,
+      borderLeftWidth: 3,
       gap: BLOCK_GAP,
     },
+    bullet_list_icon: {
+      color: palette.faintForeground,
+    },
     table: {
-      borderColor: palette.mutedForeground,
+      borderColor: palette.input,
       borderWidth: StyleSheet.hairlineWidth,
     },
     tr: {
-      borderColor: palette.mutedForeground,
+      borderColor: palette.input,
       borderBottomWidth: StyleSheet.hairlineWidth,
     },
     th: {
-      fontWeight: "600",
+      ...typeScale.caption,
+      color: palette.foreground,
+      fontWeight: fontWeight.medium,
+    },
+    td: {
+      ...typeScale.caption,
+      color: palette.mutedForeground,
+    },
+    bullet_list: {
+      gap: BLOCK_GAP,
+    },
+    ordered_list: {
+      gap: BLOCK_GAP,
+    },
+    ordered_list_icon: {
+      color: palette.faintForeground,
+      fontSize: typeScale.secondary.fontSize,
+      fontVariant: ["tabular-nums"],
+      marginLeft: 0,
+      marginRight: 0,
     },
     hr: {
-      backgroundColor: palette.mutedForeground,
+      backgroundColor: palette.border,
       height: StyleSheet.hairlineWidth,
     },
     // Custom keys. An image label outside a text node inherits no color, so it carries the body color.
@@ -219,7 +373,13 @@ function markdownStyles(palette: ColorTokens) {
       color: palette.foreground,
       fontWeight: "500",
       textDecorationLine: "underline",
-      textDecorationColor: palette.mutedForeground,
+      textDecorationColor: palette.input,
+    },
+    // A page named in a message keeps the text's colour; only a faint underline marks it.
+    page_chip_title: {
+      textDecorationLine: "underline",
+      textDecorationColor:
+        palette.foreground.length === 7 ? `${palette.foreground}4D` : palette.input,
     },
     link_favicon_plate: {
       backgroundColor: palette.faviconPlate,
@@ -242,23 +402,37 @@ async function openSafeLink(url: string) {
 
 const OpenLinkContext = createContext<(url: string) => void>(() => undefined);
 
-function useNativeLinkConfirm() {
+/** Opens a link the way a chat link opens: through the prompt unless it is in-app or trusted. */
+export function useNativeLinkConfirm() {
   const appOrigin = useMarkdownLinkAppOrigin();
   const copy = useMarkdownLinkCopy();
+  const { sites, trust } = useMarkdownLinkTrust();
   return useCallback(
     (raw: string) => {
       const url = sanitizeMarkdownUrl(raw);
       if (!url) return;
-      if (!markdownLinkRequiresConfirmation(url, appOrigin)) {
+      if (!markdownLinkNeedsPrompt(url, appOrigin, sites)) {
         void openSafeLink(url);
         return;
       }
+      const site = trust ? markdownLinkSite(url) : undefined;
       // Keep the actual host visible even when userinfo or the path is very long.
       Alert.alert(
         copy.title,
         `${new URL(url).host}\n\n${url}`,
         [
           { text: copy.cancel, style: "cancel" },
+          ...(trust && site
+            ? [
+                {
+                  text: copy.alwaysOpen(site),
+                  onPress: () => {
+                    void openSafeLink(url);
+                    trust(url);
+                  },
+                },
+              ]
+            : []),
           {
             text: copy.open,
             onPress: () => {
@@ -269,7 +443,7 @@ function useNativeLinkConfirm() {
         { cancelable: true },
       );
     },
-    [appOrigin, copy],
+    [appOrigin, copy, sites, trust],
   );
 }
 
@@ -401,57 +575,12 @@ function textStyleForParents(
   return style;
 }
 
-const TABLE_FONT_SIZE = 15.5;
-const TABLE_LINE_HEIGHT = 23;
-const TABLE_CELL_PADDING = 5;
-const TABLE_SINGLE_LINE_HEIGHT = TABLE_LINE_HEIGHT + TABLE_CELL_PADDING * 2;
+const TABLE_FONT_SIZE = typeScale.caption.fontSize;
 const TABLE_CELL_GUTTER = 16;
 const TABLE_MIN_COLUMN_WIDTH = 64;
 const TABLE_MAX_COLUMN_WIDTH = 220;
-const TABLE_VISIBLE_EDGE = 8;
 
-type TableLayout = {
-  widths: readonly number[];
-  viewportWidth: number;
-  scrollX: number;
-};
-
-const TableLayoutContext = createContext<TableLayout>({
-  widths: [],
-  viewportWidth: 0,
-  scrollX: 0,
-});
-
-function columnOffset(widths: readonly number[], index: number) {
-  let offset = 0;
-  for (let cursor = 0; cursor < index; cursor++) offset += widths[cursor] ?? 0;
-  return offset;
-}
-
-function columnContributesHeight(
-  index: number,
-  widths: readonly number[],
-  viewportWidth: number,
-  scrollX: number,
-) {
-  const start = columnOffset(widths, index);
-  const width = widths[index] ?? 0;
-  if (width <= 0) return false;
-  if (viewportWidth <= 0) return start === 0;
-  const overlap = Math.min(start + width, scrollX + viewportWidth) - Math.max(start, scrollX);
-  return overlap > TABLE_VISIBLE_EDGE;
-}
-
-function heightMask(widths: readonly number[], viewportWidth: number, scrollX: number) {
-  return widths
-    .map((_, index) => (columnContributesHeight(index, widths, viewportWidth, scrollX) ? "1" : "0"))
-    .join("");
-}
-
-const offscreenCell: ViewStyle = {
-  height: TABLE_SINGLE_LINE_HEIGHT,
-  overflow: "hidden",
-};
+const TableColumnWidthsContext = createContext<readonly number[]>([]);
 
 function glyphEm(char: string) {
   if (char === " " || char === "\n" || char === "\t") return 0.33;
@@ -553,14 +682,9 @@ function TableCell({
   baseStyle: StyleProp<ViewStyle>;
   children?: ReactNode;
 }) {
-  const { widths, viewportWidth, scrollX } = useContext(TableLayoutContext);
+  const widths = useContext(TableColumnWidthsContext);
   const width = widths[columnIndex] ?? TABLE_MIN_COLUMN_WIDTH;
-  const contributes = columnContributesHeight(columnIndex, widths, viewportWidth, scrollX);
-  return (
-    <View style={[baseStyle, columnStyle(width), contributes ? null : offscreenCell]}>
-      {children}
-    </View>
-  );
+  return <View style={[baseStyle, columnStyle(width)]}>{children}</View>;
 }
 
 function TableRow({
@@ -570,7 +694,7 @@ function TableRow({
   baseStyle: StyleProp<ViewStyle>;
   children?: ReactNode;
 }) {
-  const { widths } = useContext(TableLayoutContext);
+  const widths = useContext(TableColumnWidthsContext);
   const rowWidth = widths.reduce((total, width) => total + width, 0);
   return (
     <View style={[baseStyle, { width: rowWidth, minWidth: rowWidth, flexShrink: 0 }]}>
@@ -579,13 +703,109 @@ function TableRow({
   );
 }
 
-const tableFrame: ViewStyle = {
+const scrollFrame: ViewStyle = {
   width: "100%",
   maxWidth: "100%",
   minWidth: 0,
   flexShrink: 1,
   flexDirection: "row",
 };
+
+// Matches Pressable's default long-press delay.
+const MESSAGE_LONG_PRESS_DELAY = 500;
+export const MarkdownLongPressContext = createContext<
+  ((event: GestureResponderEvent) => void) | undefined
+>(undefined);
+
+/**
+ * A block that scrolls sideways when it is wider than the bubble. Tables pass the width they lay
+ * out to; code is measured.
+ */
+function SidewaysScrollView({
+  contentWidth,
+  onViewportWidth,
+  style,
+  children,
+}: {
+  contentWidth?: number;
+  onViewportWidth?: (width: number) => void;
+  style?: StyleProp<ViewStyle>;
+  children?: ReactNode;
+}) {
+  const onLongPress = useContext(MarkdownLongPressContext);
+  const touchStart = useRef({ x: 0, y: 0 });
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const cancelLongPress = useCallback(() => {
+    clearTimeout(timer.current);
+    timer.current = undefined;
+  }, []);
+  useEffect(() => cancelLongPress, [cancelLongPress]);
+  const [viewportWidth, setViewportWidth] = useState(0);
+  const [measuredWidth, setMeasuredWidth] = useState(0);
+  const measured = contentWidth === undefined;
+  const width = contentWidth ?? measuredWidth;
+  // A block that fits isn't a scroll area, so VoiceOver shouldn't announce scroll bars on it.
+  const overflows = viewportWidth > 0 && width > viewportWidth;
+  return (
+    <View
+      style={scrollFrame}
+      onLayout={(event) => {
+        const next = Math.round(event.nativeEvent.layout.width);
+        setViewportWidth(next);
+        onViewportWidth?.(next);
+      }}
+    >
+      <ScrollView
+        horizontal
+        scrollEnabled={overflows}
+        showsHorizontalScrollIndicator={overflows}
+        showsVerticalScrollIndicator={false}
+        nestedScrollEnabled
+        directionalLockEnabled
+        onContentSizeChange={measured ? (next) => setMeasuredWidth(Math.round(next)) : undefined}
+        style={[
+          style,
+          viewportWidth > 0 ? { width: viewportWidth } : { flexGrow: 1, flexShrink: 1 },
+        ]}
+        // Measured content fills a bubble it fits, like a block that doesn't scroll.
+        contentContainerStyle={{ flexGrow: measured ? 1 : 0 }}
+      >
+        <View
+          // Claim before the bubble blocks native scrolling; deeper link responders still win.
+          onStartShouldSetResponder={() => overflows}
+          onResponderGrant={(event) => {
+            cancelLongPress();
+            touchStart.current = { x: event.nativeEvent.pageX, y: event.nativeEvent.pageY };
+            if (onLongPress) {
+              event.persist();
+              timer.current = setTimeout(() => {
+                timer.current = undefined;
+                onLongPress(event);
+              }, MESSAGE_LONG_PRESS_DELAY);
+            }
+          }}
+          onResponderMove={({ nativeEvent }) => {
+            if (
+              Math.abs(nativeEvent.pageX - touchStart.current.x) > 5 ||
+              Math.abs(nativeEvent.pageY - touchStart.current.y) > 5
+            )
+              cancelLongPress();
+          }}
+          onResponderRelease={cancelLongPress}
+          onResponderTerminate={cancelLongPress}
+          onResponderTerminationRequest={() => true}
+          style={
+            measured
+              ? { flexGrow: 1 }
+              : { width: contentWidth, minWidth: contentWidth, flexShrink: 0 }
+          }
+        >
+          {children}
+        </View>
+      </ScrollView>
+    </View>
+  );
+}
 
 function TableScrollView({
   table,
@@ -597,61 +817,212 @@ function TableScrollView({
   style?: StyleProp<ViewStyle>;
 }) {
   const [viewportWidth, setViewportWidth] = useState(0);
-  const [scrollX, setScrollX] = useState(0);
   const widths = useMemo(() => fittedColumnWidths(table, viewportWidth), [table, viewportWidth]);
-  const contentWidth = widths.reduce((total, width) => total + width, 0);
-  // A table that fits isn't a scroll area, so VoiceOver shouldn't announce scroll bars on it.
-  const overflows = viewportWidth > 0 && contentWidth > viewportWidth;
-  const tableLayout = useMemo(
-    () => ({ widths, viewportWidth, scrollX }),
-    [widths, viewportWidth, scrollX],
-  );
-  const onScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const next = event.nativeEvent.contentOffset.x;
-    setScrollX((current) =>
-      heightMask(widths, viewportWidth, current) === heightMask(widths, viewportWidth, next)
-        ? current
-        : next,
-    );
-  };
   return (
-    <View
-      style={tableFrame}
-      onLayout={(event) => {
-        const next = Math.round(event.nativeEvent.layout.width);
-        setViewportWidth((current) => (current === next ? current : next));
-      }}
-    >
-      <TableLayoutContext.Provider value={tableLayout}>
-        <ScrollView
-          horizontal
-          scrollEnabled={overflows}
-          showsHorizontalScrollIndicator={overflows}
-          showsVerticalScrollIndicator={false}
-          nestedScrollEnabled
-          directionalLockEnabled
-          scrollEventThrottle={16}
-          onScroll={onScroll}
-          style={[
-            style,
-            viewportWidth > 0 ? { width: viewportWidth } : { flexGrow: 1, flexShrink: 1 },
-          ]}
-          contentContainerStyle={{ flexGrow: 0 }}
+    <TableColumnWidthsContext.Provider value={widths}>
+      <SidewaysScrollView
+        contentWidth={widths.reduce((total, width) => total + width, 0)}
+        onViewportWidth={setViewportWidth}
+        style={style}
+      >
+        {children}
+      </SidewaysScrollView>
+    </TableColumnWidthsContext.Provider>
+  );
+}
+
+export type MermaidDiagramProps = {
+  source: string;
+  palette: ColorTokens;
+  colorScheme: ResolvedAppearance;
+  /** The code block, for the app to show while the diagram draws or when it cannot. */
+  fallback: ReactNode;
+};
+
+/**
+ * Draws a ```mermaid fence. Mermaid needs a browser engine, so the app supplies the drawing
+ * (a WebView); without one, a fence stays a code block.
+ */
+export const MermaidDiagramContext = createContext<ComponentType<MermaidDiagramProps> | null>(null);
+
+/**
+ * The app's control for copying a code block, given the code exactly as written. Without one,
+ * code blocks have no copy control.
+ */
+export const CodeCopyButtonContext = createContext<ComponentType<{ code: string }> | null>(null);
+
+/** Code in a sideways scroll view, with its copy control beside it so the control stays put. */
+function CodeScrollView({ code, children }: { code: string; children?: ReactNode }) {
+  const CopyButton = useContext(CodeCopyButtonContext);
+  const scrollView = <SidewaysScrollView>{children}</SidewaysScrollView>;
+  if (!CopyButton || !/\S/.test(code)) return scrollView;
+  return (
+    <View style={layout.codeRow}>
+      {scrollView}
+      <CopyButton code={code} />
+    </View>
+  );
+}
+
+const DiagramSurfaceContext = createContext<{
+  streaming: boolean;
+  palette: ColorTokens;
+  colorScheme: ResolvedAppearance;
+}>({ streaming: false, palette: darkTokens, colorScheme: "dark" });
+
+function MermaidFence({ source, fallback }: { source: string; fallback: ReactNode }) {
+  const Diagram = useContext(MermaidDiagramContext);
+  const { streaming, palette, colorScheme } = useContext(DiagramSurfaceContext);
+  // A streaming reply may still be writing the fence, so it reads as code until the reply ends.
+  if (!Diagram || streaming || !source.trim()) return fallback;
+  return (
+    <Diagram source={source} palette={palette} colorScheme={colorScheme} fallback={fallback} />
+  );
+}
+
+/**
+ * The library's fenced code block, drawn here so its lines keep their shape and scroll sideways
+ * in the same scroll view as tables.
+ */
+function CodeFence({
+  code,
+  language,
+  colorScheme,
+  styleMap,
+}: {
+  code: string;
+  language: string;
+  colorScheme: ResolvedAppearance;
+  styleMap: MarkdownStyleMap;
+}) {
+  const theme = colorScheme === "dark" ? themes.oneDark : themes.oneLight;
+  return (
+    <View style={styleMap._VIEW_SAFE_fence}>
+      <FenceHeader language={language} styleMap={styleMap} />
+      <CodeScrollView code={code}>
+        <Highlight theme={theme} code={code} language={language || "text"}>
+          {({ tokens, getTokenProps }) => (
+            <View style={styleMap._VIEW_SAFE_fence_code}>
+              {tokens.map((line, lineIndex) => (
+                <View key={lineIndex} style={layout.codeLine}>
+                  {line.every((token) => token.empty) ? (
+                    <Text style={[{ color: theme.plain.color }, styleMap.fence_token]}> </Text>
+                  ) : null}
+                  {line
+                    .filter((token) => !token.empty)
+                    .map((token, tokenIndex) => {
+                      const tokenStyle = getTokenProps({ token }).style;
+                      return (
+                        <Text
+                          key={tokenIndex}
+                          style={[
+                            // Prism leaves plain text to inherit the line's colour, which
+                            // React Native text doesn't. A colour set on fence_token wins.
+                            { color: theme.plain.color },
+                            styleMap.fence_token,
+                            tokenStyle?.color != null ? { color: tokenStyle.color } : null,
+                            tokenStyle?.fontStyle != null
+                              ? { fontStyle: tokenStyle.fontStyle as TextStyle["fontStyle"] }
+                              : null,
+                            tokenStyle?.fontWeight != null
+                              ? { fontWeight: tokenStyle.fontWeight as TextStyle["fontWeight"] }
+                              : null,
+                          ]}
+                        >
+                          {token.content}
+                        </Text>
+                      );
+                    })}
+                </View>
+              ))}
+            </View>
+          )}
+        </Highlight>
+      </CodeScrollView>
+    </View>
+  );
+}
+
+/** A fence's language label, above its code. */
+function FenceHeader({ language, styleMap }: { language: string; styleMap: MarkdownStyleMap }) {
+  if (!language) return null;
+  return (
+    <View style={styleMap._VIEW_SAFE_fence_header}>
+      <Text style={styleMap.fence_language_label}>{language}</Text>
+    </View>
+  );
+}
+
+/**
+ * A fence marked as plain text. Its lines wrap in the body font instead of keeping their shape
+ * and scrolling sideways.
+ */
+function ProseFence({
+  code,
+  language,
+  styleMap,
+}: {
+  code: string;
+  language: string;
+  styleMap: MarkdownStyleMap;
+}) {
+  const CopyButton = useContext(CodeCopyButtonContext);
+  const prose = (
+    <View style={[styleMap._VIEW_SAFE_fence_code, layout.proseCode]}>
+      {code.split("\n").map((line, index) => (
+        // An empty line keeps its height through a space, as a blank code line does. Each line
+        // aligns by its own direction, as a paragraph does.
+        <Text
+          key={index}
+          style={[styleMap.fence_prose, contraryDirection(line) && layout.farSideText]}
         >
-          <View
-            // iOS won't scroll while an ancestor, like a pressable bubble, holds the touch.
-            onStartShouldSetResponder={() => Platform.OS === "ios" && overflows}
-            style={{ width: contentWidth, minWidth: contentWidth, flexShrink: 0 }}
-          >
-            {children}
-          </View>
-        </ScrollView>
-      </TableLayoutContext.Provider>
+          {line || " "}
+        </Text>
+      ))}
+    </View>
+  );
+  return (
+    <View style={styleMap._VIEW_SAFE_fence}>
+      <FenceHeader language={language} styleMap={styleMap} />
+      {CopyButton && /\S/.test(code) ? (
+        <View style={layout.codeRow}>
+          {prose}
+          <CopyButton code={code} />
+        </View>
+      ) : (
+        prose
+      )}
     </View>
   );
 }
 
 type RenderRule = NonNullable<RenderRules["link"]>;
+
+/** One column width per list, with the number against the text, so item text lines up past 9. */
+function NumberColumn({
+  list,
+  markup,
+  reversed,
+  children,
+}: {
+  list: ASTNode;
+  markup: string;
+  reversed: boolean;
+  children: ReactNode;
+}) {
+  // The number grows with the iOS text size up to the app's limit, so its column does too.
+  const fontScale = Math.min(useWindowDimensions().fontScale, MAX_FONT_SCALE);
+  return (
+    <View
+      style={[
+        { minWidth: numberColumnWidth(list, markup, fontScale) },
+        reversed ? layout.numberAfter : layout.numberBefore,
+      ]}
+    >
+      {children}
+    </View>
+  );
+}
 
 // Automatic basis: `flex: 1` is zero-width and collapses a shrink-wrapped list bubble.
 function listItemRule(
@@ -675,12 +1046,56 @@ function listItemRule(
   const list = parent.find(
     (ancestor) => ancestor.type === "bullet_list" || ancestor.type === "ordered_list",
   );
+  const task = node.attributes?.["data-task"];
+  if (task === "open" || task === "done") {
+    const color =
+      (StyleSheet.flatten(styleMap.bullet_list_icon) as TextStyle | undefined)?.color ??
+      body?.color;
+    // VoiceOver reads the item as one checkbox with its state. An item holding a nested list
+    // makes only its box the checkbox, so each nested item keeps its own.
+    const nested = node.children.some(
+      (child) => child.type === "bullet_list" || child.type === "ordered_list",
+    );
+    const checkbox = {
+      accessible: true,
+      accessibilityRole: "checkbox" as const,
+      accessibilityLabel: cellPlainText(nested ? (node.children[0] ?? node) : node).trim(),
+      accessibilityState: { checked: task === "done" },
+    };
+    return (
+      <View key={node.key} style={row} {...(nested ? {} : checkbox)}>
+        <View
+          style={[layout.bulletMarker, direction ? layout.taskAfter : layout.taskBefore]}
+          {...(nested ? checkbox : {})}
+        >
+          <Text style={marker} accessible={false} importantForAccessibility="no">
+            {ZERO_WIDTH_SPACE}
+          </Text>
+          <View style={[layout.taskBox, { borderColor: color }]}>
+            {task === "done" ? (
+              <Text style={[layout.taskCheck, { color }]} accessible={false}>
+                ✓
+              </Text>
+            ) : null}
+          </View>
+        </View>
+        <View style={layout.listContent}>{children}</View>
+      </View>
+    );
+  }
   if (list?.type === "bullet_list") {
+    // A dot in the list-marker colour, centred on the item's first line, at the end of the marker
+    // column. The invisible character gives the marker that line's height at the current text size.
+    const dotColor = (StyleSheet.flatten(styleMap.bullet_list_icon) as TextStyle | undefined)
+      ?.color;
     return (
       <View key={node.key} style={row}>
-        <Text style={[marker, styleMap.bullet_list_icon]} accessible={false}>
-          {Platform.select({ android: "\u2022", ios: "\u00B7", default: "\u2022" })}
-        </Text>
+        <View style={[layout.bulletMarker, direction ? layout.dotAfter : layout.dotBefore]}>
+          <Text style={marker} accessible={false} importantForAccessibility="no">
+            {ZERO_WIDTH_SPACE}
+          </Text>
+          <View style={[layout.bulletDot, { backgroundColor: dotColor ?? body?.color }]} />
+        </View>
         <View style={layout.listContent}>{children}</View>
       </View>
     );
@@ -690,10 +1105,12 @@ function listItemRule(
     const number = Number.isFinite(start) ? start + node.index : node.index + 1;
     return (
       <View key={node.key} style={row}>
-        <Text style={[marker, styleMap.ordered_list_icon]}>
-          {number}
-          {node.markup}
-        </Text>
+        <NumberColumn list={list} markup={node.markup} reversed={Boolean(direction)}>
+          <Text style={[marker, styleMap.ordered_list_icon]}>
+            {number}
+            {node.markup}
+          </Text>
+        </NumberColumn>
         <View style={layout.listContent}>{children}</View>
       </View>
     );
@@ -709,6 +1126,47 @@ function listItemRule(
 // outside the text flow and collapses the bubble height, overlapping later messages.
 const renderRules: RenderRules = {
   list_item: listItemRule,
+  fence: (node, _children, _parents, styleMap, _onCopyCode, colorScheme) => {
+    const info = typeof node.sourceInfo === "string" ? node.sourceInfo : "";
+    const source = node.content.replace(/\n$/, "");
+    const language = info.trim().split(/\s+/)[0] ?? "";
+    const codeBlock = isProseFence(language) ? (
+      <ProseFence key={node.key} code={source} language={language} styleMap={styleMap} />
+    ) : (
+      <CodeFence
+        key={node.key}
+        code={source}
+        language={language}
+        colorScheme={colorScheme === "dark" ? "dark" : "light"}
+        styleMap={styleMap}
+      />
+    );
+    if (!isMermaidFence(info)) return codeBlock;
+    return <MermaidFence key={node.key} source={source} fallback={codeBlock} />;
+  },
+  // The frame moves from the text to a view around it, so the copy control sits inside it.
+  code_block: (node, children, parents, styleMap, ...extra) => {
+    const { borderWidth, borderColor, borderRadius, backgroundColor, ...text } =
+      StyleSheet.flatten(styleMap.code_block) ?? {};
+    return (
+      <View
+        key={node.key}
+        style={[{ borderWidth, borderColor, borderRadius, backgroundColor }, layout.codeFrame]}
+      >
+        <CodeScrollView code={node.content.replace(/\n$/, "")}>
+          {/* The library's own rule, made here so it draws with the app's Text, which the app
+              replaces after this file loads. */}
+          {libraryRenderRules(Text).code_block?.(
+            node,
+            children,
+            parents,
+            { ...styleMap, code_block: text },
+            ...extra,
+          )}
+        </CodeScrollView>
+      </View>
+    );
+  },
   textgroup: (node, children, _parent, styleMap) => (
     <Text
       key={node.key}
@@ -788,12 +1246,171 @@ const renderRules: RenderRules = {
   },
 };
 
+/** What a chip in the text does: a mention's rendering, and opening a linked page. */
+const InlineChipsContext = createContext<
+  Pick<ChatMarkdownProps, "renderMention" | "onOpenPage"> & { palette: ColorTokens }
+>({ palette: darkTokens });
+
+function MarkdownMention({
+  id,
+  name,
+  children,
+}: {
+  id: string;
+  name: string;
+  children: ReactNode;
+}) {
+  const { renderMention } = useContext(InlineChipsContext);
+  return renderMention?.(id, name) ?? <Text>{children}</Text>;
+}
+
+/** `PAGE_ICON` drawn from views so it can sit inline in text; the flap is a border triangle. */
+export function PageIcon({
+  colors,
+  width = PAGE_ICON.width,
+  style,
+}: {
+  /** The app's resolved palette, which can differ from the device's color scheme. */
+  colors: ColorTokens;
+  width?: number;
+  style?: StyleProp<ViewStyle>;
+}) {
+  const s = width / PAGE_ICON.width;
+  const { foldX, foldY, radius } = PAGE_ICON;
+  const sheet = { position: "absolute", backgroundColor: colors.pageIconSheet } as const;
+  return (
+    <View
+      accessible={false}
+      importantForAccessibility="no-hide-descendants"
+      style={[{ width, height: PAGE_ICON.height * s }, style]}
+    >
+      <View
+        style={[
+          sheet,
+          {
+            left: 0,
+            top: 0,
+            bottom: 0,
+            width: foldX * s,
+            borderTopLeftRadius: radius * s,
+            borderBottomLeftRadius: radius * s,
+          },
+        ]}
+      />
+      <View
+        style={[
+          sheet,
+          {
+            left: foldX * s - 0.5,
+            right: 0,
+            top: foldY * s,
+            bottom: 0,
+            borderBottomRightRadius: radius * s,
+          },
+        ]}
+      />
+      <View
+        style={{
+          position: "absolute",
+          left: foldX * s,
+          top: 0,
+          width: 0,
+          height: 0,
+          borderLeftWidth: (PAGE_ICON.width - foldX) * s,
+          borderTopWidth: foldY * s,
+          borderLeftColor: colors.pageIconFold,
+          borderTopColor: "transparent",
+        }}
+      />
+      {PAGE_ICON.lines.map((line) => (
+        <View
+          key={line.y}
+          style={{
+            position: "absolute",
+            left: line.x * s,
+            top: line.y * s,
+            width: line.width * s,
+            height: line.height * s,
+            borderRadius: (line.height / 2) * s,
+            backgroundColor: colors[line.token],
+          }}
+        />
+      ))}
+      {PAGE_ICON.bars.map((bar, index) => (
+        <View
+          key={bar.x}
+          style={{
+            position: "absolute",
+            left: bar.x * s,
+            top: bar.y * s,
+            width: PAGE_ICON.barWidth * s,
+            height: bar.height * s,
+            borderRadius: (PAGE_ICON.barWidth / 2) * s,
+            backgroundColor: pageIconBars[index],
+          }}
+        />
+      ))}
+    </View>
+  );
+}
+
+// The chip's icon is 17/16 of the text, its bottom 2pt below the baseline and 7pt before the
+// title at 16pt text. Inline views drop their margins, so the gap is part of the view.
+const chipIconHeight = (typeScale.body.fontSize * 17) / 16;
+const chipIconWidth = (chipIconHeight * PAGE_ICON.width) / PAGE_ICON.height;
+const pageChipMarker = {
+  width: chipIconWidth + (chipIconHeight * 7) / 17,
+  height: chipIconHeight,
+  transform: [{ translateY: (chipIconHeight * 2) / 17 }],
+} as const;
+
+function MarkdownPageChip({
+  pageId,
+  children,
+  titleStyle,
+  onOpenPage,
+}: {
+  pageId: string;
+  children: ReactNode;
+  titleStyle: MarkdownStyleMap[string];
+  /** A user bubble's opener; Markdown reads it from the message. */
+  onOpenPage?: (pageId: string) => void;
+}) {
+  const { onOpenPage: fromMessage, palette } = useContext(InlineChipsContext);
+  const openPage = onOpenPage ?? fromMessage;
+  if (!openPage) return <Text>{children}</Text>;
+  return (
+    <Text accessibilityRole="link" onPress={() => openPage(pageId)}>
+      <View style={pageChipMarker}>
+        <PageIcon colors={palette} width={chipIconWidth} />
+      </View>
+      <Text style={titleStyle}>{children}</Text>
+    </Text>
+  );
+}
+
 function renderMarkdownLink(
   node: ASTNode,
   children: ReactNode[],
   styleMap: MarkdownStyleMap,
   block: boolean,
 ) {
+  const pageId = markdownPageId(node.attributes.href);
+  if (pageId) {
+    return (
+      <MarkdownPageChip key={node.key} pageId={pageId} titleStyle={styleMap.page_chip_title}>
+        {children}
+      </MarkdownPageChip>
+    );
+  }
+  const mentionId = markdownMentionId(node.attributes.href);
+  if (mentionId) {
+    return (
+      <MarkdownMention key={node.key} id={mentionId} name={astText(node) ?? ""}>
+        {children}
+      </MarkdownMention>
+    );
+  }
   const href = sanitizeMarkdownUrl(node.attributes.href ?? "");
   if (!href) return <Text key={node.key}>{children}</Text>;
   const image = soleRemoteImage(node);
@@ -960,6 +1577,9 @@ type LinkifiedTextProps = {
   color: string;
   linkColor: string;
   palette: ColorTokens;
+  /** Renders the runs between links, which are plain strings by default. */
+  renderText?: (text: string) => ReactNode;
+  onOpenPage?: (pageId: string) => void;
 };
 
 export const LinkifiedText = memo(function LinkifiedText({
@@ -967,23 +1587,39 @@ export const LinkifiedText = memo(function LinkifiedText({
   color,
   linkColor,
   palette,
+  renderText,
+  onOpenPage,
 }: LinkifiedTextProps) {
   const openLink = useNativeLinkConfirm();
   const labelStyle: TextStyle = {
     color,
     fontWeight: "500",
     textDecorationLine: "underline",
-    textDecorationColor: palette.mutedForeground,
+    // Links in a bubble are the bubble's text colour, so the underline is what marks them.
+    textDecorationColor: linkColor,
   };
   return (
-    <Text
-      style={[
-        { color, fontSize: BODY_FONT_SIZE, lineHeight: 23 },
-        contraryDirection(children) && layout.farSideText,
-      ]}
-    >
+    <Text style={[{ color, ...typeScale.body }, contraryDirection(children) && layout.farSideText]}>
       {plainTextLinkParts(children).map((part, index) => {
-        if (part.type === "text") return part.value;
+        if (part.type === "text") {
+          return renderText ? (
+            <Fragment key={index}>{renderText(part.value)}</Fragment>
+          ) : (
+            part.value
+          );
+        }
+        if (part.type === "page") {
+          return (
+            <MarkdownPageChip
+              key={index}
+              pageId={part.pageId}
+              titleStyle={{ textDecorationLine: "underline", textDecorationColor: linkColor }}
+              onOpenPage={onOpenPage}
+            >
+              {part.value}
+            </MarkdownPageChip>
+          );
+        }
         const open = () => {
           openLink(part.href);
         };
@@ -1026,11 +1662,17 @@ export const LinkifiedText = memo(function LinkifiedText({
 export const ChatMarkdown = memo(function ChatMarkdown({
   children,
   streaming = false,
+  renderMention,
+  onOpenPage,
   palette = darkTokens,
   colorScheme = "dark",
 }: ChatMarkdownProps & { palette?: ColorTokens; colorScheme?: ResolvedAppearance }) {
   const openLink = useNativeLinkConfirm();
   const styles = useMemo(() => markdownStyles(palette), [palette]);
+  const diagramSurface = useMemo(
+    () => ({ streaming, palette, colorScheme }),
+    [streaming, palette, colorScheme],
+  );
   const sharedProps = {
     colorScheme,
     markdownit: markdownParser,
@@ -1042,19 +1684,27 @@ export const ChatMarkdown = memo(function ChatMarkdown({
     },
   };
 
+  const inlineChips = useMemo(
+    () => ({ renderMention, onOpenPage, palette }),
+    [renderMention, onOpenPage, palette],
+  );
   return (
     <OpenLinkContext.Provider value={openLink}>
-      <View style={layout.wrap}>
-        <LinkFaviconsPausedContext.Provider value={streaming}>
-          {streaming ? (
-            <MarkdownStream {...sharedProps} cursorColor={palette.mutedForeground} streaming>
-              {children}
-            </MarkdownStream>
-          ) : (
-            <Markdown {...sharedProps}>{children}</Markdown>
-          )}
-        </LinkFaviconsPausedContext.Provider>
-      </View>
+      <InlineChipsContext.Provider value={inlineChips}>
+        <View style={layout.wrap}>
+          <LinkFaviconsPausedContext.Provider value={streaming}>
+            <DiagramSurfaceContext.Provider value={diagramSurface}>
+              {streaming ? (
+                <MarkdownStream {...sharedProps} cursorColor={palette.mutedForeground} streaming>
+                  {children}
+                </MarkdownStream>
+              ) : (
+                <Markdown {...sharedProps}>{children}</Markdown>
+              )}
+            </DiagramSurfaceContext.Provider>
+          </LinkFaviconsPausedContext.Provider>
+        </View>
+      </InlineChipsContext.Provider>
     </OpenLinkContext.Provider>
   );
 });
@@ -1065,6 +1715,52 @@ const layout = StyleSheet.create({
     minWidth: 0,
     flexShrink: 1,
   },
+  // The marker ends where the item's text begins, on whichever side the row puts the text.
+  numberBefore: {
+    alignItems: "flex-end",
+    marginRight: MARKER_GAP,
+  },
+  numberAfter: {
+    alignItems: "flex-start",
+    marginLeft: MARKER_GAP,
+  },
+  dotBefore: {
+    marginLeft: MARKER_COLUMN - BULLET_SIZE,
+    marginRight: MARKER_GAP,
+  },
+  dotAfter: {
+    marginLeft: MARKER_GAP,
+    marginRight: MARKER_COLUMN - BULLET_SIZE,
+  },
+  // Only as tall as the first line, so the dot stays on it when the item wraps. The dot sits
+  // beside the invisible character and is centred on its line.
+  bulletMarker: {
+    alignSelf: "flex-start",
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  bulletDot: {
+    width: BULLET_SIZE,
+    height: BULLET_SIZE,
+    borderRadius: BULLET_SIZE / 2,
+  },
+  taskBefore: {
+    marginLeft: MARKER_COLUMN - TASK_BOX_SIZE,
+    marginRight: MARKER_GAP,
+  },
+  taskAfter: {
+    marginLeft: MARKER_GAP,
+    marginRight: MARKER_COLUMN - TASK_BOX_SIZE,
+  },
+  taskBox: {
+    width: TASK_BOX_SIZE,
+    height: TASK_BOX_SIZE,
+    borderRadius: 4,
+    borderWidth: 1.5,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  taskCheck: { fontSize: 11, lineHeight: 13, fontWeight: "700" },
   // Deliberately no `flex: 1`: an automatic basis gives the item its text's natural width.
   listContent: {
     flexGrow: 1,
@@ -1073,6 +1769,22 @@ const layout = StyleSheet.create({
   },
   reversedRow: {
     flexDirection: "row-reverse",
+  },
+  codeLine: {
+    flexDirection: "row",
+  },
+  codeRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+  },
+  // A prose fence wraps, so its text takes the width the copy control leaves it.
+  proseCode: {
+    flexGrow: 1,
+    flexShrink: 1,
+    minWidth: 0,
+  },
+  codeFrame: {
+    overflow: "hidden",
   },
   // React Native mirrors `right` in a right-to-left app, so it is always the far side.
   farSideText: {
@@ -1106,6 +1818,10 @@ const layout = StyleSheet.create({
 });
 
 export type { ChatMarkdownProps, LinkFavicons } from "./markdown";
-export { LinkFaviconsContext, RemoteImagesContext } from "./markdown";
-
+export {
+  LinkFaviconsContext,
+  plainTextLinkParts,
+  RemoteImagesContext,
+  withBlockMentions,
+} from "./markdown";
 export { MarkdownLinkPromptProvider } from "./markdown-link-prompt";

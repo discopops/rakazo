@@ -4,12 +4,12 @@ import { resolveSandboxProvider, sandboxProviderOptionsFromEnv } from "./sandbox
 import { SshSandboxProvider } from "./ssh-sandbox.js";
 
 describe("SSH sandbox configuration", () => {
-  it("fails closed when credentials are missing", () => {
+  it("fails closed when credentials are missing", async () => {
     expect(resolveSandboxProvider({ SANDBOX_PROVIDER: "ssh" })).toBe("none");
-    expect(createSandboxProvider("ssh", {}).describe().id).toBe("none");
+    expect((await createSandboxProvider("ssh", {})).describe().id).toBe("none");
   });
 
-  it("accepts an explicit SSH provider with bounded privileges", () => {
+  it("accepts an explicit SSH provider with bounded privileges", async () => {
     const env = {
       SANDBOX_PROVIDER: "ssh",
       SSH_SANDBOX_HOST: "192.0.2.10",
@@ -19,7 +19,7 @@ describe("SSH sandbox configuration", () => {
     };
     expect(resolveSandboxProvider(env)).toBe("ssh");
     const options = sandboxProviderOptionsFromEnv(env);
-    const provider = createSandboxProvider("ssh", options);
+    const provider = await createSandboxProvider("ssh", options);
     expect(provider).toBeInstanceOf(SshSandboxProvider);
     expect(provider.describe()).toMatchObject({
       id: "ssh",

@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
+import { isIPv4 } from "node:net";
 import path from "node:path";
 import { TERMINAL_SERVER_PROGRAM } from "./terminal-server.js";
 // Each live Chrome needs a private debugger port. This is the TCP address-space
 // boundary, not a product limit on bots or saved browser profiles.
 export const MAX_DESKTOP_DISPLAY = 65535 - 9221;
 export const BROWSER_APPLICATIONS = new Set([
+  "brave",
+  "brave-browser",
   "browser",
   "chrome",
   "chromium",
@@ -21,14 +24,35 @@ export interface DesktopEnvironment {
   displayStart: number;
   preservePrimaryDisplay?: boolean;
   portStart?: number;
+  bindHost?: string;
 }
 export const DEFAULT_DESKTOP_ENV: DesktopEnvironment = {
   homeDir: "/home/rakazo",
   workspaceDir: "/home/rakazo",
   browserProfilesDir: "/home/rakazo/.browser-profiles",
   displayStart: 1,
+  bindHost: "127.0.0.1",
   preservePrimaryDisplay: true,
 };
+/** Rebuildable tool caches live outside the saved home. Tools create these under /tmp. */
+export const COMPUTER_CACHE_ENV = {
+  XDG_CACHE_HOME: "/tmp/rakazo-cache/xdg",
+  npm_config_cache: "/tmp/rakazo-cache/npm",
+  PIP_CACHE_DIR: "/tmp/rakazo-cache/pip",
+  PLAYWRIGHT_BROWSERS_PATH: "/tmp/rakazo-cache/ms-playwright",
+  UV_CACHE_DIR: "/tmp/rakazo-cache/uv",
+};
+
+function gatewayHost(host = "127.0.0.1") {
+  if (host !== "localhost" && host !== "::" && !isIPv4(host))
+    throw new Error("invalid screen gateway bind host");
+  return host;
+}
+
+function gatewayProbeHost(host: string) {
+  return host === "0.0.0.0" ? "127.0.0.1" : host === "::" ? "::1" : host;
+}
+
 export function screenPorts(index: number, env = DEFAULT_DESKTOP_ENV) {
   if (!Number.isSafeInteger(index) || index < 0 || index + env.displayStart > MAX_DESKTOP_DISPLAY)
     throw new Error("invalid desktop index");
@@ -36,6 +60,7 @@ export function screenPorts(index: number, env = DEFAULT_DESKTOP_ENV) {
   return {
     display: `:${displayNumber}`,
     displayNumber,
+    bindHost: gatewayHost(env.bindHost),
     viewPort: String(env.portStart ?? 6080),
     controlPort: String(env.portStart ?? 6080),
     debugPort: 9221 + displayNumber,
@@ -49,12 +74,15 @@ function commandLayout(index: number | undefined, env: DesktopEnvironment) {
     display: ":${desktop_display}",
     // biome-ignore lint/suspicious/noTemplateCurlyInString: generated shell parameter expansion
     displayNumber: "${desktop_display}",
+    bindHost: gatewayHost(env.bindHost),
     viewPort: String(env.portStart ?? 6080),
     controlPort: String(env.portStart ?? 6080),
     // biome-ignore lint/suspicious/noTemplateCurlyInString: generated shell parameter expansion
     debugPort: "${desktop_debug}",
   };
 }
+
+type DesktopLayout = Omit<ReturnType<typeof commandLayout>, "bindHost"> & { bindHost?: string };
 
 function layoutVariables(index: number | undefined, env: DesktopEnvironment) {
   if (index !== undefined) return [];
@@ -95,9 +123,6 @@ function browserRunningFunction(profile: string, pidFile: string) {
   const flag = shellQuote(`--user-data-dir=${profile}`);
   const profileQuoted = shellQuote(profile);
   return [
-    "browser_running() {",
-    `  tracked=$(cat ${pidFile} 2>/dev/null || true)`,
-    `  lock=$(readlink ${profileQuoted}/SingletonLock 2>/dev/null || true)`,
     // Match the configured flag in either NUL-separated argv or Chromium's one-line
     // setproctitle. Searching for the whole flag keeps spaces and " --" inside the path.
     "  cmdline_text() {",
@@ -135,6 +160,9 @@ function browserRunningFunction(profile: string, pidFile: string) {
     `    printf %s "$1" >${pidFile} 2>/dev/null || true`,
     "    return 0",
     "  }",
+    "browser_running() {",
+    `  tracked=$(cat ${pidFile} 2>/dev/null || true)`,
+    `  lock=$(readlink ${profileQuoted}/SingletonLock 2>/dev/null || true)`,
     // Pid files and SingletonLock miss the browser after a supervisor restart or a wrapper
     // whose lock does not point at the process that still has --user-data-dir.
     // biome-ignore lint/suspicious/noTemplateCurlyInString: shell parameter expansion
@@ -185,7 +213,7 @@ function browserLauncherCommand(
     '  while [ -n "$_rest" ]; do',
     '    case "$_rest" in',
     // biome-ignore lint/suspicious/noTemplateCurlyInString: generated shell parameter expansion
-    '      *:*) _entry="${_rest%%:*}"; _rest="${_rest#*:}" ;;',
+    '      *[:\\ ]*) _entry="${_rest%%[: ]*}"; _rest="${_rest#*[: ]}" ;;',
     '      *) _entry="$_rest"; _rest="" ;;',
     "    esac",
     '    case "$_entry" in',
@@ -197,7 +225,7 @@ function browserLauncherCommand(
     '  if [ -n "$_kept" ]; then export LD_PRELOAD="$_kept"; else unset LD_PRELOAD; fi',
     "  unset _kept _rest _entry",
     "fi",
-    `exec "$browser" --test-type --no-sandbox --disable-dev-shm-usage --disable-gpu --enable-unsafe-swiftshader --no-first-run --no-default-browser-check --disable-session-crashed-bubble --hide-crash-restore-bubble --password-store=basic --start-maximized --remote-debugging-address=127.0.0.1 --remote-debugging-port=${layout.debugPort} --user-data-dir=${shellQuote(browserProfilePathForScreen(screenId, env))} "$@"`,
+    `exec "$browser" --test-type --no-sandbox --disable-dev-shm-usage --disable-gpu --enable-unsafe-swiftshader --no-first-run --no-default-browser-check --disable-session-crashed-bubble --hide-crash-restore-bubble --password-store=basic --restore-last-session --start-maximized --remote-debugging-address=127.0.0.1 --remote-debugging-port=${layout.debugPort} --user-data-dir=${shellQuote(browserProfilePathForScreen(screenId, env))} "$@"`,
   ].join("\n");
 }
 
@@ -257,6 +285,9 @@ export function browserCloseProgram() {
   return CLOSE_BROWSER;
 }
 
+/** Exit status of a browser stop that found a browser open on the profile again. */
+export const BROWSER_STILL_RUNNING_EXIT = 76;
+
 export function stopBrowserCommand(screenId: string, env = DEFAULT_DESKTOP_ENV) {
   return stopBrowserProfileCommand(
     browserProfilePathForScreen(screenId, env),
@@ -270,11 +301,13 @@ export function stopBrowserProfileCommand(profile: string, pidFile: string) {
     ...browserRunningFunction(profile, pidFile),
     `if browser_running; then`,
     `  python3 -c ${shellQuote(CLOSE_BROWSER)} "$pid" ${shellQuote(profile)} >/dev/null 2>&1 || true`,
-    `  for i in $(seq 1 40); do browser_running || break; sleep 0.25; done`,
-    `  if browser_running; then kill "$pid" 2>/dev/null || true; for i in $(seq 1 40); do browser_running || break; sleep 0.25; done; fi`,
-    `  browser_running && kill -KILL "$pid" 2>/dev/null || true`,
+    `  for i in $(seq 1 40); do browser_matches "$pid" || break; sleep 0.25; done`,
+    `  if browser_matches "$pid"; then kill "$pid" 2>/dev/null || true; for i in $(seq 1 40); do browser_matches "$pid" || break; sleep 0.25; done; fi`,
+    `  browser_matches "$pid" && kill -KILL "$pid" 2>/dev/null || true`,
     `fi`,
-    `if browser_running; then echo 'browser still running' >&2; exit 1; fi`,
+    // A supervisor may have replaced the selected PID while it was closing.
+    // Rediscover once before removing lock state rather than on every close poll.
+    `if browser_running; then echo 'browser still running' >&2; exit ${BROWSER_STILL_RUNNING_EXIT}; fi`,
     `rm -f ${pidFile}`,
     `rm -f ${shellQuote(profile)}/SingletonLock ${shellQuote(profile)}/SingletonCookie ${shellQuote(profile)}/SingletonSocket`,
   ].join("\n");
@@ -288,6 +321,7 @@ function stopProfileDirectoriesCommand(profileList: string) {
   return [
     "set -eu",
     "failed=0",
+    "running=0",
     "mkdir -p /tmp/rakazo",
     `for profile in ${profileList}; do`,
     '  [ -d "$profile" ] || continue',
@@ -297,9 +331,10 @@ function stopProfileDirectoriesCommand(profileList: string) {
     '    *) hash=$(basename -- "$profile") ;;',
     "  esac",
     '  pid_file="/tmp/rakazo/browser-pid-$hash"',
-    `  bash -eu -c ${shellQuote(`profile=$1; pid_file=$2;\n${stop}`)} desktop "$profile" "$pid_file" || failed=1`,
+    `  bash -eu -c ${shellQuote(`profile=$1; pid_file=$2;\n${stop}`)} desktop "$profile" "$pid_file" || { [ "$?" -eq ${BROWSER_STILL_RUNNING_EXIT} ] && running=1 || failed=1; }`,
     "done",
     '[ "$failed" -eq 0 ] || exit 1',
+    `[ "$running" -eq 0 ] || exit ${BROWSER_STILL_RUNNING_EXIT}`,
   ].join("\n");
 }
 
@@ -370,7 +405,7 @@ function revokeTargetCommand(kind: "view" | "control" | "terminal", display: num
   return `mkdir -p ${TARGETS}; : >/tmp/rakazo/${kind}-target-next-${display}; mv /tmp/rakazo/${kind}-target-next-${display} ${TARGETS}/${kind}-${display}`;
 }
 
-function stopVncCommand(kind: "view" | "control", layout: ReturnType<typeof commandLayout>) {
+function stopVncCommand(kind: "view" | "control", layout: DesktopLayout) {
   const socketPrefix = `/tmp/rakazo/sockets/${kind}-${layout.displayNumber}-`;
   const pattern = quoteLayout(`^([^ ]*/)?x11vnc .* -unixsock ${socketPrefix}[^ ]+( |$)`);
   return [
@@ -389,7 +424,7 @@ function terminalServerPattern(socket: string) {
   return `^([^ ]*/)?python[0-9.]* ${TERMINAL_SERVER} ${socket}( |$)`;
 }
 
-function stopTerminalCommand(layout: ReturnType<typeof commandLayout>) {
+function stopTerminalCommand(layout: DesktopLayout) {
   const socketPrefix = `/tmp/rakazo/sockets/terminal-${layout.displayNumber}-`;
   const pattern = quoteLayout(terminalServerPattern(`${socketPrefix}[^ ]+`));
   return [
@@ -402,27 +437,34 @@ function stopTerminalCommand(layout: ReturnType<typeof commandLayout>) {
   ].join("\n");
 }
 
-function gatewayCommand(port: string) {
+function gatewayCommand(port: string, host = "127.0.0.1") {
+  host = gatewayHost(host);
+  const probeHost = gatewayProbeHost(host);
+  const hostPattern = host.replaceAll(".", "[.]");
   const processPattern = `^([^ ]*/)?python[0-9.]* +(-m +websockify|[^ ]*websockify[^ ]*) +.*`;
   const portPattern = shellQuote(`${processPattern}[ :]${port}( |$)`);
   const gatewayPattern = shellQuote(
-    `${processPattern}--token-source=${TARGETS} +0.0.0.0:${port}( |$)`,
+    `${processPattern}--token-source=${TARGETS} +${hostPattern}:${port}( |$)`,
   );
   return [
     proxyEnvironmentCommand(),
     `mkdir -p ${TARGETS}`,
     // This lock only covers gateway startup; desktop startup remains independent.
     `exec 10>/tmp/rakazo/gateway-${port}.lock; flock -w 120 10`,
-    `if ! pgrep -f ${gatewayPattern} >/dev/null || ! (echo >/dev/tcp/127.0.0.1/${port}) >/dev/null 2>&1; then`,
+    `if ! pgrep -f ${gatewayPattern} >/dev/null || ! (echo >/dev/tcp/${probeHost}/${port}) >/dev/null 2>&1; then`,
     // Older images boot a single-screen gateway on this port. Retire it under the startup lock.
     `  pkill -f ${portPattern} || true`,
-    `  for i in $(seq 1 20); do if ! (echo >/dev/tcp/127.0.0.1/${port}) >/dev/null 2>&1; then break; fi; sleep 0.1; done`,
-    `  if (echo >/dev/tcp/127.0.0.1/${port}) >/dev/null 2>&1; then echo 'screen gateway port is busy' >&2; exit 1; fi`,
-    `  nohup "$proxy" --heartbeat=30 --web="$web" --token-plugin=TokenFile --token-source=${TARGETS} 0.0.0.0:${port} 8>&- 9>&- 10>&- </dev/null >/tmp/rakazo/gateway-${port}.log 2>&1 &`,
+    `  for i in $(seq 1 20); do if ! (echo >/dev/tcp/${probeHost}/${port}) >/dev/null 2>&1; then break; fi; sleep 0.1; done`,
+    `  if (echo >/dev/tcp/${probeHost}/${port}) >/dev/null 2>&1; then echo 'screen gateway port is busy' >&2; exit 1; fi`,
+    `  nohup "$proxy" --heartbeat=30 --web="$web" --token-plugin=TokenFile --token-source=${TARGETS} ${host}:${port} 8>&- 9>&- 10>&- </dev/null >/tmp/rakazo/gateway-${port}.log 2>&1 &`,
     "fi",
-    `for i in $(seq 1 50); do (echo >/dev/tcp/127.0.0.1/${port}) >/dev/null 2>&1 && break; sleep 0.1; done`,
+    `for i in $(seq 1 50); do (echo >/dev/tcp/${probeHost}/${port}) >/dev/null 2>&1 && break; sleep 0.1; done`,
     `flock -u 10; exec 10>&-`,
-    `(echo >/dev/tcp/127.0.0.1/${port}) >/dev/null 2>&1`,
+    `if ! (echo >/dev/tcp/${probeHost}/${port}) >/dev/null 2>&1; then`,
+    "  echo 'screen gateway did not start' >&2",
+    `  tail -c 2000 /tmp/rakazo/gateway-${port}.log >&2 || true`,
+    "  exit 1",
+    "fi",
   ].join("\n");
 }
 
@@ -525,7 +567,7 @@ function renderEnsureScreenCommand(
           `  rm -f /tmp/.X${layout.displayNumber}-lock /tmp/.X11-unix/X${layout.displayNumber}`,
           `  nohup Xvfb ${layout.display} -screen 0 1280x800x24 -ac +extension RANDR +render -noreset -nolisten tcp 8>&- 9>&- </dev/null >${log}-xvfb.log 2>&1 &`,
           `  for i in $(seq 1 100); do xdpyinfo -display ${layout.display} >/dev/null 2>&1 && break; sleep 0.1; done`,
-          `  xdpyinfo -display ${layout.display} >/dev/null 2>&1 || exit 1`,
+          `  if ! xdpyinfo -display ${layout.display} >/dev/null 2>&1; then echo 'computer display did not start' >&2; tail -c 2000 ${log}-xvfb.log >&2 || true; exit 1; fi`,
           `  if [ -f /etc/rakazo/fluxbox/init ]; then cp /etc/rakazo/fluxbox/init ${fluxHome}/.fluxbox/init; else printf "session.screen0.toolbar.visible: false\\n" >${fluxHome}/.fluxbox/init; fi`,
           `  cp /etc/rakazo/fluxbox/apps ${fluxHome}/.fluxbox/apps 2>/dev/null || true`,
           `  printf '\\nsession.menuFile: %s\\n' ${fluxHome}/.fluxbox/menu >>${fluxHome}/.fluxbox/init`,
@@ -541,7 +583,7 @@ function renderEnsureScreenCommand(
     `  nohup x11vnc -display ${layout.display} -forever -shared -viewonly -nopw -rfbport 0 -unixsock ${socket} -xkb -ncache 0 8>&- 9>&- </dev/null >${log}-x11vnc.log 2>&1 &`,
     "fi",
     `for i in $(seq 1 50); do [ -S ${socket} ] && break; sleep 0.1; done`,
-    `[ -S ${socket} ] || exit 1`,
+    `if [ ! -S ${socket} ]; then echo 'screen viewer did not start' >&2; tail -c 2000 ${log}-x11vnc.log >&2 || true; exit 1; fi`,
     // Leave an unchanged mapping in place. Replacing it on every ensure races
     // TokenFile, which reloads the directory on each handshake.
     `desired=$(printf '%s: unix_socket:%s\\n' "$desktop_view_token" ${socket})`,
@@ -549,7 +591,7 @@ function renderEnsureScreenCommand(
     `  printf '%s\\n' "$desired" >/tmp/rakazo/view-target-next-${layout.displayNumber}`,
     `  mv /tmp/rakazo/view-target-next-${layout.displayNumber} ${targetFile}`,
     "fi",
-    gatewayCommand(layout.viewPort),
+    gatewayCommand(layout.viewPort, layout.bindHost),
   ];
   return [
     "set -eu",
@@ -561,23 +603,41 @@ function renderEnsureScreenCommand(
     `printf %s ${shellQuote(browserLauncherCommand(index, screenId, env))} >${browserLauncherPath(layout.displayNumber)}`,
     `chmod 700 ${browserLauncherPath(layout.displayNumber)}`,
     ...setupDisplay,
-    `xdpyinfo -display ${layout.display} >/dev/null 2>&1 || exit 1`,
+    `xdpyinfo -display ${layout.display} >/dev/null 2>&1 || { echo 'computer display is not running' >&2; exit 1; }`,
     `mkdir -p /tmp/rakazo ${shellQuote(path.posix.dirname(profile))}`,
     ...browserRunningFunction(profile, pidFile),
     `printf %s ${shellQuote(profile)} >/tmp/rakazo/browser-profile-${layout.displayNumber}`,
-    "if ! browser_running; then",
-    prepareBrowserProfileCommand(screenId, env),
+    "launch_browser() {",
+    `  ${prepareBrowserProfileCommand(screenId, env)}`,
     `  rm -f ${shellQuote(profile)}/SingletonLock ${shellQuote(profile)}/SingletonCookie ${shellQuote(profile)}/SingletonSocket`,
-    `  nohup ${browserLauncherPath(layout.displayNumber)} 8>&- 9>&- </dev/null >${log}-browser.log 2>&1 & printf %s "$!" >${pidFile}`,
-    "fi",
-    `for i in $(seq 1 80); do browser_running && (echo >/dev/tcp/127.0.0.1/${layout.debugPort}) >/dev/null 2>&1 && break; sleep 0.25; done`,
+    `  nohup ${browserLauncherPath(layout.displayNumber)} 8>&- 9>&- </dev/null >${log}-browser.log 2>&1 & launched=$!`,
+    `  printf %s "$launched" >${pidFile}`,
+    "}",
+    "launched=",
+    "relaunched=0",
+    "browser_running || launch_browser",
+    "waited=0",
+    'while [ "$waited" -lt 80 ]; do',
+    "  if browser_running; then",
+    `    (echo >/dev/tcp/127.0.0.1/${layout.debugPort}) >/dev/null 2>&1 && break`,
+    // The browser found running can be closed, by its window or a home save, before its port
+    // answers. Start it again once rather than wait out a browser that is gone.
+    '  elif [ "$relaunched" -eq 0 ] && ! { [ -n "$launched" ] && kill -0 "$launched" 2>/dev/null; }; then',
+    "    relaunched=1",
+    "    waited=0",
+    "    launch_browser",
+    "  fi",
+    "  sleep 0.25",
+    "  waited=$((waited + 1))",
+    "done",
     `if ! browser_running || ! (echo >/dev/tcp/127.0.0.1/${layout.debugPort}) >/dev/null 2>&1; then`,
     `  echo "computer browser CDP not ready on ${layout.debugPort} (running=$(browser_running && echo yes || echo no))" >&2`,
     `  tail -c 4000 ${log}-browser.log >&2 || true`,
     "  exit 1",
     "fi",
     ...setupView,
-    `for i in $(seq 1 50); do (echo >/dev/tcp/127.0.0.1/${layout.viewPort}) >/dev/null 2>&1 && exit 0; sleep 0.1; done`,
+    `for i in $(seq 1 50); do (echo >/dev/tcp/${gatewayProbeHost(layout.bindHost)}/${layout.viewPort}) >/dev/null 2>&1 && exit 0; sleep 0.1; done`,
+    "echo 'screen view port did not open' >&2",
     "exit 1",
   ].join("\n");
 }
@@ -585,11 +645,12 @@ function renderEnsureScreenCommand(
 export function interactiveScreenCommand(
   interactive: boolean,
   controlToken?: string,
-  layout: ReturnType<typeof commandLayout> = screenPorts(0),
+  layout: DesktopLayout = screenPorts(0),
 ) {
   const tokenFile = `/tmp/rakazo/control-token-${layout.displayNumber}`;
   const targetFile = `${TARGETS}/control-${layout.displayNumber}`;
   const stopProcesses = [
+    "set -eu",
     revokeTargetCommand("control", layout.displayNumber),
     stopVncCommand("control", layout),
     // The terminal belongs to the control lease and ends with it.
@@ -607,17 +668,24 @@ export function interactiveScreenCommand(
   }
   if (!controlToken) throw new Error("interactive screen requires a control token");
   const socket = `/tmp/rakazo/sockets/control-${layout.displayNumber}-${browserKeyForScreen(controlToken)}`;
+  const process = quoteLayout(`^([^ ]*/)?x11vnc .* -unixsock ${socket}( |$)`);
   return [
-    `[ -f ${tokenFile} ] && [ "$(cat ${tokenFile})" = ${shellQuote(controlToken)} ] && [ -S ${socket} ] && pgrep -f ${quoteLayout(`^([^ ]*/)?x11vnc .* -unixsock ${socket}( |$)`)} >/dev/null && (echo >/dev/tcp/127.0.0.1/${layout.controlPort}) >/dev/null 2>&1 && exit 0 || true`,
+    "set -eu",
+    `if ! { [ -f ${tokenFile} ] && [ "$(cat ${tokenFile})" = ${shellQuote(controlToken)} ] && [ -S ${socket} ] && pgrep -f ${process} >/dev/null; }; then`,
     stopProcesses,
     `mkdir -p ${TARGETS} /tmp/rakazo/sockets`,
-    `printf %s ${shellQuote(controlToken)} >${tokenFile}`,
     `nohup x11vnc -display ${layout.display} -forever -shared -nopw -rfbport 0 -unixsock ${socket} -xkb -ncache 0 8>&- 9>&- </dev/null >/tmp/rakazo/x11vnc-control-${layout.displayNumber}.log 2>&1 &`,
-    `for i in $(seq 1 50); do [ -S ${socket} ] && break; sleep 0.1; done`,
-    `[ -S ${socket} ] || exit 1`,
-    `printf '%s: unix_socket:%s\\n' ${shellQuote(controlToken)} ${socket} >/tmp/rakazo/control-target-next-${layout.displayNumber}`,
-    `mv /tmp/rakazo/control-target-next-${layout.displayNumber} ${targetFile}`,
-    gatewayCommand(layout.controlPort),
+    `for i in $(seq 1 50); do [ -S ${socket} ] && pgrep -f ${process} >/dev/null && break; sleep 0.1; done`,
+    `[ -S ${socket} ] && pgrep -f ${process} >/dev/null || exit 1`,
+    `printf %s ${shellQuote(controlToken)} >${tokenFile}`,
+    "fi",
+    // Repair missing/empty routes even when the input-capable process is already alive.
+    `desired=$(printf '%s: unix_socket:%s\\n' ${shellQuote(controlToken)} ${socket})`,
+    `if [ ! -f ${targetFile} ] || [ "$(cat ${targetFile})" != "$desired" ]; then`,
+    `  printf '%s\\n' "$desired" >/tmp/rakazo/control-target-next-${layout.displayNumber}`,
+    `  mv /tmp/rakazo/control-target-next-${layout.displayNumber} ${targetFile}`,
+    "fi",
+    gatewayCommand(layout.controlPort, layout.bindHost),
   ].join("\n");
 }
 
@@ -631,12 +699,12 @@ export function terminalCommand(
   terminalToken: string,
   cwd: string,
   env = DEFAULT_DESKTOP_ENV,
-  layout: ReturnType<typeof commandLayout> = screenPorts(0),
+  layout: DesktopLayout = screenPorts(0, env),
 ) {
   return [
     startTerminalCommand(controlToken, terminalToken, cwd, env, layout),
     proxyEnvironmentCommand(),
-    gatewayCommand(layout.controlPort),
+    gatewayCommand(layout.controlPort, layout.bindHost),
   ].join("\n");
 }
 
@@ -646,7 +714,7 @@ export function startTerminalCommand(
   terminalToken: string,
   cwd: string,
   env = DEFAULT_DESKTOP_ENV,
-  layout: ReturnType<typeof commandLayout> = screenPorts(0),
+  layout: DesktopLayout = screenPorts(0, env),
 ) {
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(terminalToken)) throw new Error("invalid terminal token");
   const display = layout.displayNumber;
@@ -750,6 +818,20 @@ print(index)
   ].join("\n");
 }
 
+/**
+ * Run `argv` with DISPLAY on the screen assigned to `screenId`, so screen tools in a bot's
+ * shell see its own desktop. Without an assignment the inherited DISPLAY stays.
+ */
+export function screenDisplayArgv(argv: readonly string[], screenId: string, displayStart: number) {
+  const slot = `${REGISTRY}/${browserKeyForScreen(screenId)}.slot`;
+  const program = [
+    `index=$(sed -n 1p ${shellQuote(slot)} 2>/dev/null)`,
+    `case "$index" in ''|*[!0-9]*) ;; *) DISPLAY=:$((index + ${displayStart})); export DISPLAY ;; esac`,
+    'exec "$@"',
+  ].join("\n");
+  return ["sh", "-c", program, "sh", ...argv];
+}
+
 /** Tear down before freeing a slot; failed teardown leaves it reserved for retry. */
 export function releaseDesktopCommand(
   screenId: string,
@@ -774,13 +856,17 @@ export function releaseDesktopCommand(
   ].join("\n");
 }
 
-/** Guard a control transition with the persisted allocation and execution fence. */
+/**
+ * Guard a control transition with the persisted allocation and execution fence.
+ * Revoking without a token ends any control on the display but keeps its slot, fence,
+ * view, and browser for the bot's next run.
+ */
 export function desktopControlCommand(
   screenId: string,
   leaseId: string | undefined,
   env: DesktopEnvironment,
   interactive: boolean,
-  token: string,
+  token?: string,
 ) {
   return [
     ...registryLockCommand(screenId),

@@ -38,6 +38,20 @@ describe("reply context", () => {
     expect(context).toContain("Test message 1/3: Hello!");
   });
 
+  it("gives a reply to a page card the page's id and version", async () => {
+    const card = {
+      id: "message-first",
+      threadId: "thread-1",
+      role: "bot",
+      blocks: [{ kind: "page", pageId: "page-1", version: 3, title: "Q3 plan" }],
+    };
+    for (const quote of [null, "Q3 plan"]) {
+      // A quoted reply to the card still reads it whole, not just its title.
+      const context = await loadReplyContext(harness(card, quote).prisma, "thread-1", "user-reply");
+      expect(context).toContain("[page: Q3 plan (pageId page-1, version 3)]");
+    }
+  });
+
   it("does not add context without a source or a surviving reply target", async () => {
     const { prisma, findFirst } = harness();
     expect(await loadReplyContext(prisma, "thread-1", null)).toBeUndefined();
@@ -99,6 +113,25 @@ describe("reply context", () => {
     expect(
       messageToAgentHistoryText({ ...message, replyTo: { ...target, threadId: "other" } }),
     ).toBe("❤️");
+  });
+
+  it("supplies the current reaction once with its target, without a bare emoji task", async () => {
+    const { prisma, findFirst } = harness(target);
+    findFirst.mockResolvedValueOnce({
+      id: "reaction-1",
+      threadId: "thread-1",
+      role: "user",
+      blocks: [{ kind: "text", text: "👍" }],
+      replyToMessageId: target.id,
+      replyQuote: null,
+      replyTo: target,
+    });
+    const prompt = await loadReplyContext(prisma, "thread-1", "reaction-1");
+    expect(prompt?.match(/👍/g)).toHaveLength(1);
+    expect(prompt).toContain("User reacted with 👍 to");
+    expect(prompt).toContain(`<reaction_target>`);
+    expect(prompt).toContain('"messageId":"message-first"');
+    expect(prompt).toContain("Test message 1/3: Hello!");
   });
 
   it("preserves reply context in historical messages", () => {

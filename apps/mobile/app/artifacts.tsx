@@ -1,6 +1,8 @@
-import { useFocusEffect, useNavigation, useRouter } from "expo-router";
+import { artifactTypeLabel } from "@rakazo/core";
+import { useFocusEffect, useLocalSearchParams, useNavigation, useRouter } from "expo-router";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { LayoutChangeEvent } from "react-native";
 import {
   ActivityIndicator,
   Alert,
@@ -20,19 +22,16 @@ import type { MobileBot } from "../lib/api";
 import { rpc } from "../lib/api";
 import { mobileTokens } from "../lib/appearance";
 import type { MobileArtifactSummary } from "../lib/artifacts";
-import {
-  listSpaceArtifacts,
-  matchesArtifactQuery,
-  mimeBadgeLabel,
-  removeArtifact,
-} from "../lib/artifacts";
+import { listSpaceArtifacts, matchesArtifactQuery, removeArtifact } from "../lib/artifacts";
 import { useI18n } from "../lib/i18n";
 import { native, useThemedStyles } from "../lib/native";
+import { useSideInsets } from "../lib/side-insets";
 import { errorText } from "../lib/user-error";
 
 const PAGE_SIZE = 30;
 
 export default function ArtifactsScreen() {
+  const sideInsets = useSideInsets();
   const navigation = useNavigation();
   const router = useRouter();
   const { t } = useI18n();
@@ -40,7 +39,28 @@ export default function ArtifactsScreen() {
   const insets = useSafeAreaInsets();
 
   const [bots, setBots] = useState<MobileBot[]>([]);
-  const [activeBotId, setActiveBotId] = useState<string | null>(null);
+  const { botId } = useLocalSearchParams<{ botId?: string }>();
+  const [activeBotId, setActiveBotId] = useState<string | null>(botId || null);
+  const chipsScrollRef = useRef<ScrollView>(null);
+  const initialChipLayout = useRef({
+    viewportWidth: 0,
+    contentWidth: 0,
+    chip: null as { x: number; width: number } | null,
+    revealed: false,
+  });
+
+  function revealInitialChip() {
+    const layout = initialChipLayout.current;
+    if (layout.revealed || !layout.viewportWidth || !layout.chip) return;
+    const right = layout.chip.x + layout.chip.width;
+    if (layout.contentWidth < right) return;
+    chipsScrollRef.current?.scrollTo({
+      x: Math.max(0, right - layout.viewportWidth),
+      animated: false,
+    });
+    layout.revealed = true;
+  }
+
   const [items, setItems] = useState<MobileArtifactSummary[] | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -71,7 +91,7 @@ export default function ArtifactsScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      rpc<MobileBot[]>("bots/list")
+      rpc("bots/list")
         .then(setBots)
         .catch(() => undefined);
     }, []),
@@ -204,6 +224,15 @@ export default function ArtifactsScreen() {
       <FlatList<MobileArtifactSummary>
         ListHeaderComponent={
           <ScrollView
+            ref={chipsScrollRef}
+            onLayout={(event) => {
+              initialChipLayout.current.viewportWidth = event.nativeEvent.layout.width;
+              revealInitialChip();
+            }}
+            onContentSizeChange={(width) => {
+              initialChipLayout.current.contentWidth = width;
+              revealInitialChip();
+            }}
             horizontal
             contentInsetAdjustmentBehavior="never"
             showsHorizontalScrollIndicator={false}
@@ -218,15 +247,30 @@ export default function ArtifactsScreen() {
             {bots.map((bot) => (
               <Chip
                 key={bot.id}
+                onLayout={
+                  bot.id === botId && activeBotId === botId
+                    ? (event) => {
+                        initialChipLayout.current.chip = event.nativeEvent.layout;
+                        revealInitialChip();
+                      }
+                    : undefined
+                }
                 label={bot.name}
                 active={activeBotId === bot.id}
                 onPress={() => setActiveBotId(bot.id)}
-                avatar={<BotAvatar color={bot.color} identity={bot.id} size={16} />}
+                avatar={
+                  <BotAvatar
+                    color={bot.color}
+                    avatarSet={bot.avatarSet}
+                    identity={bot.id}
+                    size={16}
+                  />
+                }
               />
             ))}
           </ScrollView>
         }
-        style={styles.listView}
+        style={[styles.listView, sideInsets]}
         contentInsetAdjustmentBehavior="automatic"
         data={filtered ?? []}
         keyExtractor={(item) => item.id}
@@ -300,11 +344,13 @@ function Chip({
   active,
   onPress,
   avatar,
+  onLayout,
 }: {
   label: string;
   active: boolean;
   onPress: () => void;
   avatar?: ReactNode;
+  onLayout?: (event: LayoutChangeEvent) => void;
 }) {
   const styles = useThemedStyles(createStyles);
   return (
@@ -312,6 +358,7 @@ function Chip({
       accessibilityRole="button"
       accessibilityState={{ selected: active }}
       onPress={onPress}
+      onLayout={onLayout}
       style={[styles.chip, active && styles.chipActive]}
     >
       {avatar}
@@ -358,7 +405,7 @@ function ArtifactRow({
             {item.name}
           </Text>
           {item.versionCount > 1 ? <Text style={styles.badge}>{`v${item.version}`}</Text> : null}
-          <Text style={styles.badge}>{mimeBadgeLabel(item.mimeType)}</Text>
+          <Text style={styles.badge}>{artifactTypeLabel(item.mimeType)}</Text>
         </View>
         {item.description ? (
           <Text style={styles.rowDescription} numberOfLines={1}>
@@ -368,7 +415,7 @@ function ArtifactRow({
         <View style={styles.rowFooter}>
           {bot ? (
             <>
-              <BotAvatar color={bot.color} identity={bot.id} size={14} />
+              <BotAvatar color={bot.color} avatarSet={bot.avatarSet} identity={bot.id} size={14} />
               <Text style={styles.rowBotName} numberOfLines={1}>
                 {bot.name}
               </Text>

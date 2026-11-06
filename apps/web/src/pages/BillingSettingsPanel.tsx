@@ -2,7 +2,8 @@ import { Plural, Trans, useLingui } from "@lingui/react/macro";
 import type { BillingStatus } from "@rakazo/contracts";
 import { Button, Skeleton } from "@rakazo/ui-web";
 import { useEffect, useState } from "react";
-import { formatBillingDate, formatBillingPrice } from "../lib/billing";
+import { ModelCreditsSettings } from "../components/ModelCredits";
+import { billingDateLabel, formatBillingPrice } from "../lib/billing";
 import { rpc } from "../lib/rpc";
 
 export function BillingSettingsPanel() {
@@ -54,36 +55,35 @@ export function BillingSettingsPanel() {
             : t`Inactive`
     : null;
 
-  const date = status ? billingDate(status) : null;
-  const day = date ? formatBillingDate(date.at, locale) : "";
-  const dateLabel = date
-    ? date.kind === "trial"
-      ? t`Trial ends ${day}`
-      : date.kind === "ends"
-        ? t`Ends ${day}`
-        : t`Renews ${day}`
-    : null;
+  const dateLabel = status ? billingDateLabel(status, locale) : null;
 
   const price = status?.price ? formatBillingPrice(status.price, locale) : null;
   const seats = status?.seats ?? 0;
+
+  if (status?.funding !== undefined)
+    return (
+      <ModelCreditsSettings
+        status={status}
+        refresh={async () => setStatus(await rpc.billing.status())}
+      />
+    );
 
   return (
     <div data-testid="billing-settings" className="rounded-xl border border-border px-4 py-4">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           {status ? (
-            <h3 className="text-[15px] font-medium text-foreground">{stateLabel}</h3>
+            <h3 className="text-heading3 font-medium text-foreground">{stateLabel}</h3>
           ) : error ? null : (
             <Skeleton className="h-5 w-24" />
           )}
           {price ? (
-            <p className="mt-3 text-[14px] text-foreground/75">
-              {price}
+            <p className="mt-3 flex flex-wrap gap-x-2 text-[14px] text-foreground/75">
+              <span>{price}</span>
               {seats > 1 ? (
-                <>
-                  {" · "}
+                <span className="text-muted-foreground">
                   <Plural value={seats} one="# seat" other="# seats" />
-                </>
+                </span>
               ) : null}
             </p>
           ) : null}
@@ -109,17 +109,4 @@ export function BillingSettingsPanel() {
       ) : null}
     </div>
   );
-}
-
-function billingDate(
-  status: BillingStatus,
-): { kind: "trial" | "ends" | "renews"; at: string } | null {
-  if (status.state === "trialing" && status.trialEndsAt) {
-    return { kind: "trial", at: status.trialEndsAt };
-  }
-  if (!status.currentPeriodEndsAt) return null;
-  if (status.cancelAtPeriodEnd || status.state === "canceled") {
-    return { kind: "ends", at: status.currentPeriodEndsAt };
-  }
-  return { kind: "renews", at: status.currentPeriodEndsAt };
 }

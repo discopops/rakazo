@@ -1,7 +1,9 @@
 import * as z from "zod";
-import { botSecretDestinationSchema } from "./bot-secrets.js";
-import { Id } from "./ids.js";
+import { AgentImportSetupItemSchema } from "./agent-import-setup.js";
+import { botSecretDestinationSchema, LoginFieldLabels, OneTimeCodeTarget } from "./bot-secrets.js";
+import { Id, ThinkingLevelSchema } from "./ids.js";
 import { McpTransportSchema } from "./mcp.js";
+import { PAGE_TITLE_MAX_LENGTH } from "./pages.js";
 
 export const ProductEventType = z.enum([
   "thread.message.created",
@@ -93,6 +95,16 @@ const ChartBlock = z
 export const SecretAskPurpose = z.enum(["otp", "password", "api_key"]);
 export type SecretAskPurpose = z.infer<typeof SecretAskPurpose>;
 
+/** The settings a bot can change on itself from chat. */
+export const BotSettingsValuesSchema = z.object({
+  modelProvider: z.string().trim().min(1).max(80).nullable().optional(),
+  modelId: z.string().trim().min(1).max(200).nullable().optional(),
+  thinkingLevel: ThinkingLevelSchema.nullable().optional(),
+  autoSpeak: z.boolean().optional(),
+  voiceId: z.string().max(120).nullable().optional(),
+});
+export type BotSettingsValues = z.infer<typeof BotSettingsValuesSchema>;
+
 export const MessageBlock = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("text"), text: z.string() }),
   z.object({
@@ -112,7 +124,12 @@ export const MessageBlock = z.discriminatedUnion("kind", [
         undoVersionId: Id.optional(),
       })
       .optional(),
+    /** A settings change made from chat; undo writes `before` back while `after` still holds. */
+    settingsUpdate: z
+      .object({ botId: Id, before: BotSettingsValuesSchema, after: BotSettingsValuesSchema })
+      .optional(),
     detail: z.string().optional(),
+    detailFormat: z.enum(["text", "code"]).optional(),
     input: z.enum(["text", "secret"]).optional(),
     /** Why the secret is needed; drives field label on the masked card. */
     purpose: SecretAskPurpose.optional(),
@@ -120,8 +137,20 @@ export const MessageBlock = z.discriminatedUnion("kind", [
     // an ask persisted before an owner toggles the private-HTTP flag still
     // validates on replay.
     credential: botSecretDestinationSchema({ allowPrivateHttpOrigin: true }).optional(),
+    /** A texted or emailed code for this site's page; answered once, never saved. */
+    oneTimeCode: OneTimeCodeTarget.optional(),
+    /** On a login card, the saved login this card replaces and the site it is saved for. */
+    replaces: z.object({ id: z.string().max(64), origin: z.string().max(2048) }).optional(),
+    /** The fields a login card asks for, by label; absent means DEFAULT_LOGIN_FIELD_LABELS. */
+    loginFields: LoginFieldLabels.optional(),
+    /** On a fetch approval, the site an "always" answer allows. */
+    site: z.string().optional(),
     status: z.enum(["pending", "answered"]).optional(),
     answer: z.string().optional(),
+    /** A secret request the user dismissed instead of answering. */
+    dismissed: z.literal(true).optional(),
+    /** A login the user used for this run only instead of saving it. */
+    remembered: z.literal(false).optional(),
     actions: z
       .array(
         z.object({
@@ -170,6 +199,21 @@ export const MessageBlock = z.discriminatedUnion("kind", [
     callId: z.string().optional(),
     title: z.string(),
     farewell: z.string(),
+    /** Connected time the caller's client measured; absent when the bot hung up. */
+    durationSeconds: z.number().int().nonnegative().optional(),
+  }),
+  z.object({
+    /** The bot is calling the user; the card tracks the call from ringing to its outcome. */
+    kind: z.literal("call_request"),
+    callId: z.string(),
+    /** Why the bot is calling, shown on the incoming call. */
+    reason: z.string(),
+    /** The bot's first spoken sentence once the user answers. */
+    opening: z.string(),
+    status: z.enum(["ringing", "answered", "declined", "missed"]),
+    expiresAt: z.string(),
+    /** Connected time the user's client measured after answering. */
+    durationSeconds: z.number().int().nonnegative().optional(),
   }),
   z.object({ kind: z.literal("meta"), text: z.string() }),
   z.object({
@@ -181,7 +225,14 @@ export const MessageBlock = z.discriminatedUnion("kind", [
   }),
   z.object({
     kind: z.literal("steps"),
-    steps: z.array(z.object({ label: z.string(), count: z.number().int().positive() })),
+    steps: z.array(
+      z.object({
+        label: z.string(),
+        count: z.number().int().positive(),
+        /** What the bot wrote just before this step, kept out of its reply. */
+        note: z.string().optional(),
+      }),
+    ),
     durationMs: z.number().int().nonnegative().optional(),
   }),
   z.object({
@@ -197,7 +248,6 @@ export const MessageBlock = z.discriminatedUnion("kind", [
     kind: z.literal("child_bot"),
     botId: z.string(),
     name: z.string(),
-    title: z.string().optional(),
     status: z.enum(["created", "archived", "deleted"]),
   }),
   z.object({
@@ -205,7 +255,7 @@ export const MessageBlock = z.discriminatedUnion("kind", [
     kind: z.literal("cloud_agent"),
     agentId: z.string(),
     title: z.string(),
-    status: z.enum(["running", "finished", "failed", "cancelled"]),
+    status: z.enum(["running", "finished", "failed", "cancelled", "expired"]),
     url: z.string(),
     branch: z.string().optional(),
     prUrl: z.string().optional(),
@@ -241,7 +291,15 @@ export const MessageBlock = z.discriminatedUnion("kind", [
     status: z.enum(["pending", "connected", "dismissed"]).default("pending"),
   }),
   z.object({
+    kind: z.literal("import_setup"),
+    items: z.array(AgentImportSetupItemSchema),
+    /** Set on checklists an earlier Undo retired, with `items` emptied; it is then hidden. */
+    undone: z.boolean().optional(),
+  }),
+  z.object({
     kind: z.literal("image"),
+    /** Explicit visual input requested by a confirmation-aware client. */
+    imageHandling: z.literal("confirm").optional(),
     artifactId: Id,
     mimeType: z.string(),
     name: z.string(),
@@ -252,6 +310,13 @@ export const MessageBlock = z.discriminatedUnion("kind", [
     mimeType: z.string(),
     name: z.string(),
     size: z.number().int().nonnegative(),
+  }),
+  z.object({
+    /** A page the bot saved. Title and version are as sent; read the page for its latest. */
+    kind: z.literal("page"),
+    pageId: Id,
+    version: z.number().int().positive(),
+    title: z.string().max(PAGE_TITLE_MAX_LENGTH),
   }),
   z.object({
     kind: z.literal("handoff"),
@@ -336,21 +401,46 @@ export function foldComputerCommands<T extends ComputerCommand>(events: T[]): T[
   return [...byId.values()];
 }
 
-export const ProductEventSchema = z.object({
-  id: Id,
-  spaceId: Id,
-  threadId: Id,
-  botId: Id,
-  seq: z.number().int().nonnegative(),
-  type: ProductEventType,
-  runId: Id.optional(),
-  createdAt: z.string(),
-  payload: z.record(z.string(), z.unknown()),
-});
+/** Coarse live run state. Never accepts provider reasoning content or partial messages. */
+export const ThreadActivityPayloadSchema = z
+  .object({
+    activity: z.object({ thinking: z.boolean() }).strict(),
+  })
+  .strict();
+
+/** Distinguish this live lifecycle subtype from unrelated thread metadata. */
+export function hasThinkingActivityMarker(payload: Record<string, unknown>): payload is {
+  activity: { thinking: unknown };
+} {
+  const activity = payload.activity;
+  return activity !== null && typeof activity === "object" && "thinking" in activity;
+}
+export type ThreadActivityPayload = z.infer<typeof ThreadActivityPayloadSchema>;
+
+export const ProductEventSchema = z
+  .object({
+    id: Id,
+    spaceId: Id,
+    threadId: Id,
+    botId: Id,
+    seq: z.number().int().nonnegative(),
+    type: ProductEventType,
+    runId: Id.optional(),
+    createdAt: z.string(),
+    payload: z.record(z.string(), z.unknown()),
+  })
+  .superRefine((event, ctx) => {
+    if (event.type !== "thread.meta" || !hasThinkingActivityMarker(event.payload)) return;
+    if (!event.runId || !ThreadActivityPayloadSchema.safeParse(event.payload).success) {
+      ctx.addIssue({ code: "custom", path: ["payload"], message: "Invalid run activity" });
+    }
+  });
 export type ProductEvent = z.infer<typeof ProductEventSchema>;
 
 export const ReplyPreviewSchema = z.object({
   role: MessageRole,
+  /** The parent is a page card. */
+  page: z.literal(true).optional(),
   botId: Id.optional(),
   text: z.string(),
   attachment: z

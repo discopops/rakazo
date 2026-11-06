@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 import type { ArtifactStore, MessagingInboundAttachment } from "@rakazo/adapter-kit";
+import { createAdapterContext } from "@rakazo/adapter-kit";
 import type { Actor } from "@rakazo/contracts";
 import {
   ARTIFACT_NAME_MAX_LENGTH,
   ATTACHMENT_MAX_BYTES,
-  ATTACHMENT_MAX_COUNT,
+  attachmentMaxCount,
   attachmentSizeLabel,
+  isAttachmentAudioMimeType,
 } from "@rakazo/contracts";
 import {
   AttachmentValidationError,
@@ -17,17 +19,6 @@ import {
 } from "@rakazo/core";
 import type { PrismaClient } from "@rakazo/db";
 import { IsolationError, Prisma, withResolvedArtifactVersion } from "@rakazo/db";
-
-function adapterContext(actor: ArtifactOwner, botId: string, operationId: string) {
-  return {
-    operationId,
-    traceId: operationId,
-    spaceId: actor.spaceId,
-    userId: actor.userId,
-    botId,
-    signal: new AbortController().signal,
-  };
-}
 
 export async function createOwnedArtifact(
   deps: {
@@ -48,14 +39,20 @@ export async function createOwnedArtifact(
 ) {
   const replayed = await findReplayedArtifact(deps.prisma, actor, input);
   if (replayed) return createdArtifact(replayed);
+  const inferredType = inferAttachmentMimeType(input.name, input.mimeType);
   const mimeType =
-    inferAttachmentMimeType(input.name, input.mimeType) === "application/zip"
-      ? "application/zip"
+    inferredType && (inferredType === "application/zip" || isAttachmentAudioMimeType(inferredType))
+      ? inferredType
       : input.mimeType;
   validateAttachmentMimeType(mimeType);
   const bytes = decodeAttachmentBase64(input.contentBase64, deps.maxUploadSizeBytes);
   return storeOwnedArtifact(deps, actor, { ...input, mimeType, bytes });
 }
+
+/** A stored inbound attachment plus its downloaded content when it was fresh. */
+export type StoredInboundAttachment = ReturnType<typeof createdArtifact> & {
+  bytes?: Uint8Array;
+};
 
 export async function storeInboundAttachment(
   deps: {
@@ -70,7 +67,7 @@ export async function storeInboundAttachment(
     clientNonce: string;
     downloadDeadline?: number;
   },
-) {
+): Promise<StoredInboundAttachment> {
   const replayed = await findReplayedArtifact(deps.prisma, owner, input);
   if (replayed) return createdArtifact(replayed);
   const { attachment } = input;
@@ -97,13 +94,15 @@ export async function storeInboundAttachment(
   ]).finally(() => clearTimeout(timer));
   if (bytes.byteLength === 0) throw new AttachmentValidationError("Attachment content is empty");
   if (bytes.byteLength > maxBytes) throw tooLarge;
-  return storeOwnedArtifact(deps, owner, {
+  const stored = await storeOwnedArtifact(deps, owner, {
     botId: input.botId,
     name,
     mimeType,
     bytes,
     clientNonce: input.clientNonce,
   });
+  // The replay return above carries no bytes; callers treat them as optional.
+  return { ...stored, bytes };
 }
 
 type ArtifactOwner = Pick<Actor, "spaceId" | "userId">;
@@ -122,7 +121,7 @@ async function storeOwnedArtifact(
   },
 ) {
   const { mimeType, bytes } = input;
-  const context = adapterContext(actor, input.botId, `artifact-create:${input.botId}`);
+  const context = createAdapterContext(actor, input.botId, `artifact-create:${input.botId}`);
   const stored = await deps.artifacts.put({ name: input.name, mimeType, bytes }, context);
   const hash = createHash("sha256").update(bytes).digest("hex");
   const { row, replay } = await withResolvedArtifactVersion(
@@ -280,7 +279,7 @@ async function readArtifact(
 ) {
   const bytes = await artifacts.get(
     row.storageKey,
-    adapterContext(actor, contextBotId, `artifact-get:${row.id}`),
+    createAdapterContext(actor, contextBotId, `artifact-get:${row.id}`),
   );
   return {
     id: row.id,
@@ -558,7 +557,7 @@ async function removeArtifactBlob(
   try {
     await artifacts.remove(
       member.storageKey,
-      adapterContext(actor, member.botId ?? member.id, `artifact-delete:${member.id}`),
+      createAdapterContext(actor, member.botId ?? member.id, `artifact-delete:${member.id}`),
     );
   } catch (error) {
     if (isAlreadyRemoved(error)) return;
@@ -599,10 +598,10 @@ type SendAttachmentRow = {
   storageKey: string;
 };
 
-function normalizeAttachmentIds(artifactIds: string[] | undefined) {
+function normalizeAttachmentIds(artifactIds: string[] | undefined, maxCount: number) {
   const ids = [...new Set(artifactIds ?? [])];
-  if (ids.length > ATTACHMENT_MAX_COUNT) {
-    throw new AttachmentValidationError(`At most ${ATTACHMENT_MAX_COUNT} attachments per message`);
+  if (ids.length > maxCount) {
+    throw new AttachmentValidationError(`At most ${maxCount} attachments per message`);
   }
   return ids;
 }
@@ -623,12 +622,12 @@ function toAttachmentResolution<T extends SendAttachmentRow>(ids: string[], rows
 }
 
 export async function resolveSendAttachments(
-  deps: { prisma: Pick<PrismaClient, "artifact"> },
+  deps: { prisma: Pick<PrismaClient, "artifact">; maxAttachmentsPerMessage?: number },
   actor: Actor,
   botId: string,
   artifactIds: string[] | undefined,
 ) {
-  const ids = normalizeAttachmentIds(artifactIds);
+  const ids = normalizeAttachmentIds(artifactIds, attachmentMaxCount(deps));
   if (!ids.length) return toAttachmentResolution(ids, [] as SendAttachmentRow[]);
 
   const rows = await deps.prisma.artifact.findMany({
@@ -644,13 +643,13 @@ export async function resolveSendAttachments(
 }
 
 export async function resolveGroupSendAttachments(
-  deps: { prisma: Pick<PrismaClient, "artifact"> },
+  deps: { prisma: Pick<PrismaClient, "artifact">; maxAttachmentsPerMessage?: number },
   actor: Actor,
   groupId: string,
   memberBotIds: string[],
   artifactIds: string[] | undefined,
 ) {
-  const ids = normalizeAttachmentIds(artifactIds);
+  const ids = normalizeAttachmentIds(artifactIds, attachmentMaxCount(deps));
   if (!ids.length) return toAttachmentResolution(ids, [] as SendAttachmentRow[]);
 
   const rows = await deps.prisma.artifact.findMany({

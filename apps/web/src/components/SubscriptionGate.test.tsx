@@ -5,9 +5,15 @@ import { createRoot } from "react-dom/client";
 import { afterEach, expect, it, vi } from "vitest";
 
 const api = vi.hoisted(() => ({ me: vi.fn(), status: vi.fn() }));
-vi.mock("../lib/rpc", () => ({ rpc: { me: api.me, billing: { status: api.status } } }));
+vi.mock("../lib/rpc", () => ({
+  rpc: { me: api.me, billing: { status: api.status } },
+  SPACE_SELECTED_EVENT: "rakazo:space-selected",
+}));
 vi.mock("../lib/bootstrap", () => ({ peekInitialBootstrap: () => undefined }));
 vi.mock("../pages/Paywall", () => ({ PaywallPage: () => <div>paywall</div> }));
+vi.mock("@lingui/react/macro", () => ({
+  useLingui: () => ({ t: (strings: TemplateStringsArray) => strings.join("") }),
+}));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -27,13 +33,16 @@ async function renderGate(billing: boolean) {
   );
   vi.resetModules();
   const { SubscriptionGate } = await import("./SubscriptionGate");
+  const { MemoryRouter } = await import("react-router-dom");
   const container = document.createElement("div");
   const root = createRoot(container);
   await act(async () => {
     root.render(
-      <SubscriptionGate fallback={<div>loading</div>}>
-        <div>app</div>
-      </SubscriptionGate>,
+      <MemoryRouter>
+        <SubscriptionGate fallback={<div>loading</div>}>
+          <div>app</div>
+        </SubscriptionGate>
+      </MemoryRouter>,
     );
   });
   await act(async () => {
@@ -75,5 +84,42 @@ it("shows the paywall without access and opens once a recheck finds access", asy
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
   expect(container.textContent).toBe("app");
+  act(() => root.unmount());
+});
+
+it("reloads billing for a newly selected Space", async () => {
+  api.me.mockResolvedValue({ billingEnabled: true });
+  api.status.mockResolvedValue({ access: false });
+  const { container, root } = await renderGate(true);
+  expect(container.textContent).toBe("paywall");
+
+  api.status.mockResolvedValue({ access: true });
+  await act(async () => {
+    window.dispatchEvent(new Event("rakazo:space-selected"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(container.textContent).toBe("app");
+  act(() => root.unmount());
+});
+
+it("keeps checking billing after a newly selected Space's read fails", async () => {
+  api.me.mockResolvedValue({ billingEnabled: true });
+  api.status.mockResolvedValue({ access: false });
+  const { container, root } = await renderGate(true);
+  expect(container.textContent).toBe("paywall");
+
+  api.status.mockRejectedValueOnce(new Error("offline"));
+  await act(async () => {
+    window.dispatchEvent(new Event("rakazo:space-selected"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(container.textContent).toBe("app");
+
+  api.status.mockResolvedValue({ access: false });
+  await act(async () => {
+    window.dispatchEvent(new Event("focus"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(container.textContent).toBe("paywall");
   act(() => root.unmount());
 });

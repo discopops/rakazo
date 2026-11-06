@@ -1,8 +1,11 @@
 import { MenuView } from "@expo/ui/community/menu";
+import { typeScale } from "@rakazo/ui-tokens";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import type { MobileBot, MobileGroup } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import { native, useResolvedAppearance } from "../lib/native";
+import { useSideInsets } from "../lib/side-insets";
+import { LongPressMenu } from "./long-press-menu";
 import { NativeSymbol } from "./native-symbol";
 import { Chevron } from "./row-accessories";
 
@@ -25,15 +28,19 @@ export function ArchivedBotList({
   onDelete,
   onRestoreGroup,
 }: ArchivedBotListProps) {
+  const sideInsets = useSideInsets();
   const { t } = useI18n();
   const scheme = useResolvedAppearance();
   return (
-    <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ padding: 20 }}>
+    <ScrollView
+      style={sideInsets}
+      contentInsetAdjustmentBehavior="automatic"
+      contentContainerStyle={{ padding: 20 }}
+    >
       <View style={{ borderRadius: 14, backgroundColor: native.fill, overflow: "hidden" }}>
         {bots.map((bot) => (
-          <MenuView
+          <LongPressMenu
             key={bot.id}
-            shouldOpenOnLongPress
             colorScheme={scheme}
             actions={[
               { id: "restore", title: t("Restore"), attributes: { disabled: pending } },
@@ -47,22 +54,27 @@ export function ArchivedBotList({
               nativeEvent.event === "restore" ? onRestore(bot) : onDelete(bot)
             }
           >
-            <Pressable
-              disabled={pending}
-              onPress={() => onOpen(bot)}
-              accessibilityRole="button"
-              style={{
-                minHeight: 54,
-                paddingHorizontal: 16,
-                flexDirection: "row",
-                alignItems: "center",
-                gap: 12,
-              }}
-            >
-              <Text style={{ flex: 1, color: native.label, fontSize: 16 }}>{bot.name}</Text>
-              <Chevron />
-            </Pressable>
-          </MenuView>
+            {(onLongPress) => (
+              <Pressable
+                disabled={pending}
+                onPress={() => onOpen(bot)}
+                onLongPress={onLongPress}
+                accessibilityRole="button"
+                style={{
+                  minHeight: 54,
+                  paddingHorizontal: 16,
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: 12,
+                }}
+              >
+                <Text style={{ flex: 1, color: native.label, ...typeScale.cardTitle }}>
+                  {bot.name}
+                </Text>
+                <Chevron />
+              </Pressable>
+            )}
+          </LongPressMenu>
         ))}
         {groups.map((group) => (
           <MenuView
@@ -83,7 +95,9 @@ export function ArchivedBotList({
               }}
             >
               <NativeSymbol ios="person.2" android="people-outline" color={native.secondaryLabel} />
-              <Text style={{ flex: 1, color: native.label, fontSize: 16 }}>{group.name}</Text>
+              <Text style={{ flex: 1, color: native.label, ...typeScale.cardTitle }}>
+                {group.name}
+              </Text>
             </View>
           </MenuView>
         ))}

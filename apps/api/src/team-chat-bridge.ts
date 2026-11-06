@@ -10,7 +10,9 @@ import type { MessageBlock } from "@rakazo/contracts";
 import { ATTACHMENT_MAX_COUNT, AutomatedSenderPoliciesSchema } from "@rakazo/contracts";
 import { botMessageMaxHops, messageBlockForArtifact, promptTextForAttachments } from "@rakazo/core";
 import type { PrismaClient, ThreadEvents } from "@rakazo/db";
+import { clearEndedRunState, teamChatRunClientNonce } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
+import type { MessagingReceipts } from "./messaging-receipts.js";
 import type { TeamChatEngagementJudge } from "./team-chat-judge.js";
 import {
   MESSAGE_ROUTING_REARMED_REASON,
@@ -64,7 +66,12 @@ interface TeamChatBridgeDeps {
   }) => Promise<{ id: string; name: string; mimeType: string; size: number }>;
   providerId: string;
   botId: string;
+  workspaceId?: string;
+  isAvailable?: () => Promise<boolean>;
+  conversationPrefix?: string;
+  onUnavailable?: () => void;
   judge?: TeamChatEngagementJudge;
+  acknowledge?: MessagingReceipts["acknowledge"];
   reconcileIntervalMs?: number;
   ambientDebounceMs?: number;
 }
@@ -258,10 +265,25 @@ export class TeamChatBridge {
     };
   }
 
+  private conversationScope() {
+    return {
+      provider: this.deps.providerId,
+      botId: this.deps.botId,
+      ...(this.deps.workspaceId ? { workspaceId: this.deps.workspaceId } : {}),
+      conversationId: this.deps.conversationPrefix
+        ? { startsWith: this.deps.conversationPrefix }
+        : { not: { startsWith: `${this.deps.providerId}~` } },
+    };
+  }
+
   private async receiveMessage(
     message: TeamChatInboundMessage,
     options?: { queueAgent?: boolean },
   ): Promise<TeamChatInboundTarget | DeferredTeamChatInboundTarget> {
+    if (this.deps.workspaceId && message.workspaceId !== this.deps.workspaceId)
+      throw new Error("Messaging workspace mismatch");
+    if (this.deps.isAvailable && !(await this.deps.isAvailable()))
+      throw new Error("Messaging workspace unavailable");
     await this.backfillThreadHistory(message);
     const conversation = await this.upsertConversation(message);
     const now = new Date();
@@ -299,6 +321,18 @@ export class TeamChatBridge {
       externalMessage = await this.deps.prisma.externalMessage.update({
         where: { id: externalMessage.id },
         data: { kind: message.kind, status, nextAttemptAt, engagementReason: null, judgedAt: null },
+      });
+    }
+    if (message.kind !== "ambient") {
+      const externalMessageId = externalMessage.id;
+      this.deps.acknowledge?.(message.conversationId, message.eventId, async () => {
+        const row = await this.deps.prisma.externalMessage.findUnique({
+          where: { id: externalMessageId },
+          select: { deliveredAt: true, status: true },
+        });
+        return (
+          Boolean(row?.deliveredAt) || row?.status === "ignored" || row?.status === "cancelled"
+        );
       });
     }
     await this.ensureTranscriptMessage(externalMessage, conversation, message.attachments ?? []);
@@ -435,6 +469,8 @@ export class TeamChatBridge {
     if (!target) throw new Error("Team chat bridge is not started");
     const conversation = await this.deps.prisma.externalConversation.upsert({
       where: {
+        spaceId: target.spaceId,
+        botId: target.id,
         provider_workspaceId_externalKey: {
           provider: this.deps.providerId,
           workspaceId: message.workspaceId,
@@ -478,7 +514,7 @@ export class TeamChatBridge {
       where: {
         id: externalMessageId,
         status: "deferred",
-        externalConversation: { provider: this.deps.providerId, botId: target.id },
+        externalConversation: this.conversationScope(),
       },
       // Routing can outlive the short deferred window; hold long enough for the
       // wake nonce to commit before reconcile is allowed to promote the row.
@@ -558,7 +594,7 @@ export class TeamChatBridge {
         id: externalMessageId,
         status:
           resolution === "routine" ? { in: ["deferred", "received", "observed"] } : "deferred",
-        externalConversation: { provider: this.deps.providerId, botId: target.id },
+        externalConversation: this.conversationScope(),
       },
       data:
         resolution === "routine"
@@ -586,8 +622,7 @@ export class TeamChatBridge {
           id: { notIn: [...this.mirroring.keys()] },
           providerEventId: { notIn: [...this.receiving.keys()] },
           externalConversation: {
-            provider: this.deps.providerId,
-            botId: target.id,
+            ...this.conversationScope(),
             spaceId: target.spaceId,
           },
         },
@@ -622,8 +657,7 @@ export class TeamChatBridge {
         },
         nextAttemptAt: { lte: now },
         externalConversation: {
-          provider: this.deps.providerId,
-          botId: target.id,
+          ...this.conversationScope(),
           spaceId: target.spaceId,
         },
       },
@@ -749,12 +783,9 @@ export class TeamChatBridge {
   }
 
   /**
-   * Promote expired deferred leases. If wakeMessageRoutines already persisted a
-   * routine run (crash before resolveDeferredMessage), mark the row ignored so
-   * recovery cannot also start a TeamChat agent run for the same provider event.
-   * Expired routing ownership is cleared (not promoted) so a later reconcile can
-   * take over; live wakes re-hold the heartbeat after renewal loss. Ambient judge
-   * reasons are not ownership and may promote.
+   * Promote expired deferred leases. If a routine run was already persisted (crash before
+   * resolveDeferredMessage), mark the row ignored so recovery cannot also start a TeamChat
+   * agent run for the same provider event. Expired routing ownership is cleared, not promoted.
    */
   private async recoverExpiredDeferredMessages(target: TargetBot, now: Date): Promise<void> {
     const expired = await this.deps.prisma.externalMessage.findMany({
@@ -762,8 +793,7 @@ export class TeamChatBridge {
         status: "deferred",
         nextAttemptAt: { lte: now },
         externalConversation: {
-          provider: this.deps.providerId,
-          botId: target.id,
+          ...this.conversationScope(),
         },
       },
       select: {
@@ -810,9 +840,7 @@ export class TeamChatBridge {
           // Same-process wake still delivering; keep exclusive ownership.
           continue;
         }
-        // Lease expired and no local wake: drop orphaned ownership so a later
-        // reconcile can promote. Live wakes re-hold the heartbeat after renewal
-        // loss, or are tracked in inFlightRoutineWakes above.
+        // Lease expired and no local wake: drop orphaned ownership so a later reconcile can promote.
         await this.deps.prisma.externalMessage.updateMany({
           where: {
             id: message.id,
@@ -867,6 +895,13 @@ export class TeamChatBridge {
   private async reconcile(): Promise<void> {
     const target = this.target;
     if (!target) return;
+    if (this.deps.isAvailable && !(await this.deps.isAvailable())) {
+      if (this.timer) clearInterval(this.timer);
+      this.timer = undefined;
+      this.startGeneration += 1;
+      this.deps.onUnavailable?.();
+      return;
+    }
     const now = new Date();
     await this.mirrorMissingMessages();
     await this.recoverExpiredDeferredMessages(target, now);
@@ -875,8 +910,7 @@ export class TeamChatBridge {
         status: "queueing",
         nextAttemptAt: { lte: now },
         externalConversation: {
-          provider: this.deps.providerId,
-          botId: target.id,
+          ...this.conversationScope(),
         },
       },
       data: { status: "received", engagementReason: null, nextAttemptAt: null },
@@ -888,8 +922,7 @@ export class TeamChatBridge {
         threadMessageId: { not: null },
         OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }],
         externalConversation: {
-          provider: this.deps.providerId,
-          botId: target.id,
+          ...this.conversationScope(),
         },
       },
       include: {
@@ -906,8 +939,7 @@ export class TeamChatBridge {
         status: { in: ["running", "delivering"] },
         OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }],
         externalConversation: {
-          provider: this.deps.providerId,
-          botId: target.id,
+          ...this.conversationScope(),
         },
       },
       include: { run: true, externalConversation: true },
@@ -933,8 +965,7 @@ export class TeamChatBridge {
         teamChatMirroredAt: null,
         thread: {
           externalConversation: {
-            provider: this.deps.providerId,
-            botId: target.id,
+            ...this.conversationScope(),
           },
         },
       },
@@ -1021,8 +1052,7 @@ export class TeamChatBridge {
         status: "observed",
         threadMessageId: { not: null },
         externalConversation: {
-          provider: this.deps.providerId,
-          botId: target.id,
+          ...this.conversationScope(),
         },
       },
       include: { externalConversation: true },
@@ -1055,7 +1085,8 @@ export class TeamChatBridge {
       const conversation = messages[0]?.externalConversation;
       if (!conversation) continue;
       const ambientEnabled = conversation.teamChatAmbientEnabled ?? policy.teamChatAmbientEnabled;
-      const rules = conversation.teamChatRules ?? policy.teamChatRules;
+      // Blank room instructions follow the bot, as the settings screens show them.
+      const rules = conversation.teamChatRules || policy.teamChatRules;
       const parsedPolicies = AutomatedSenderPoliciesSchema.safeParse(
         conversation.automatedSenderPolicies,
       );
@@ -1331,7 +1362,7 @@ export class TeamChatBridge {
       blocks: [{ kind: "text", text: prompt }, ...fileBlocks],
       prompt,
       trigger: "messaging",
-      clientNonce: `teamchat:${this.deps.providerId}:${message.providerEventId}`,
+      clientNonce: teamChatRunClientNonce(this.deps.providerId, message.providerEventId),
       linkMessageToRun: true,
       allowParallelRun: true,
     });
@@ -1353,6 +1384,7 @@ export class TeamChatBridge {
             leaseExpiresAt: null,
           },
         });
+        await clearEndedRunState(this.deps.prisma, [sent.runId]);
         const taskId =
           sent.taskId ??
           (
@@ -1540,12 +1572,9 @@ export class TeamChatBridge {
       return;
     }
     if (current.status === "delivered") return;
-    // Once reserved for delivery, stay in delivering. Restoring the pre-reserve
-    // "running" status would let reconciliation send again after a lost ack.
-    // A queueing failure happened before the run was linked and can safely be
-    // retried from received. Once linked, preserve running so the shared run
-    // reconciler can recover a failed continuation enqueue without creating a
-    // second message/run from this stale snapshot.
+    // Restoring the pre-reserve status would let reconciliation send again after a lost ack.
+    // Queueing failed before the run was linked, so it can retry from received; once linked,
+    // keep running so the run reconciler recovers it without a second message/run.
     const status = current.status === "queueing" ? "received" : current.status;
     // Conditional write: if reserveDelivery finalized between the read and this
     // update, leave the delivered/unconfirmed row alone.

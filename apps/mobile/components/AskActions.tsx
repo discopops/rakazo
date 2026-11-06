@@ -1,23 +1,19 @@
 import { BOT_INSTRUCTIONS_MAX_LENGTH } from "@rakazo/contracts";
 import { useState } from "react";
 import type { ViewProps } from "react-native";
-import { Alert, Pressable, Text, TextInput, View } from "react-native";
+import { Alert, TextInput, View } from "react-native";
 import { mobileTokens } from "../lib/appearance";
+import type { AskAction } from "../lib/ask-action-label";
+import { askActionLabel } from "../lib/ask-action-label";
 import { useI18n } from "../lib/i18n";
 import { native } from "../lib/native";
 import { errorText } from "../lib/user-error";
 import { NativeActionButton } from "./native-action-button";
 
-type AskAction = { id: string; label: string };
-
-const KNOWN_ASK_ACTION_LABELS: Record<string, string> = {
-  allow: "Allow once",
-  always: "Always allow",
-  deny: "Deny",
-};
-
 export function AskActions({
   actions,
+  site,
+  approval,
   instructions,
   disabled,
   onAnswer,
@@ -25,6 +21,8 @@ export function AskActions({
   onAccessibilityAction,
 }: {
   actions: AskAction[];
+  site?: string;
+  approval: boolean;
   instructions?: string;
   disabled?: boolean;
   onAnswer: (answer: string) => Promise<void>;
@@ -70,64 +68,50 @@ export function AskActions({
           style={{ color: tokens.foreground, backgroundColor: native.fill, padding: 12 }}
         />
       ) : null}
-      {displayActions.map((action) => {
-        const emphasized = action.id === "allow" || action.id === "always";
-        if (instructions !== undefined)
+      <View style={{ flexDirection: approval ? "row" : "column", flexWrap: "wrap", gap: 6 }}>
+        {displayActions.map((action) => {
+          const emphasized = action.id === "allow" || action.id === "always";
+          if (instructions !== undefined)
+            return (
+              <NativeActionButton
+                key={action.id}
+                accessibilityActions={accessibilityActions}
+                onAccessibilityAction={onAccessibilityAction}
+                label={
+                  action.id === "edit"
+                    ? action.label
+                    : t(action.id === "allow" ? "Apply" : "Dismiss")
+                }
+                prominence={emphasized ? "primary" : "secondary"}
+                fill={false}
+                disabled={disabled || submitting}
+                busy={pendingAction === action.id || (action.id === "allow" && submitting)}
+                onPress={() =>
+                  action.id === "edit"
+                    ? setEditing((value) => !value)
+                    : void submit(
+                        editing && action.id === "allow"
+                          ? JSON.stringify({ instructions: draft })
+                          : action.id,
+                      )
+                }
+              />
+            );
           return (
             <NativeActionButton
               key={action.id}
               accessibilityActions={accessibilityActions}
               onAccessibilityAction={onAccessibilityAction}
-              label={
-                action.id === "edit" ? action.label : t(action.id === "allow" ? "Apply" : "Dismiss")
-              }
+              label={askActionLabel(action, { approval, site }, t)}
               prominence={emphasized ? "primary" : "secondary"}
-              fill
+              fill={!approval}
               disabled={disabled || submitting}
-              busy={pendingAction === action.id || (action.id === "allow" && submitting)}
-              onPress={() =>
-                action.id === "edit"
-                  ? setEditing((value) => !value)
-                  : void submit(
-                      editing && action.id === "allow"
-                        ? JSON.stringify({ instructions: draft })
-                        : action.id,
-                    )
-              }
+              busy={pendingAction === action.id}
+              onPress={() => void submit(action.id)}
             />
           );
-        return (
-          <Pressable
-            key={action.id}
-            accessibilityActions={accessibilityActions}
-            onAccessibilityAction={onAccessibilityAction}
-            disabled={disabled || submitting}
-            onPress={() => void submit(action.id)}
-            style={{
-              alignSelf: "stretch",
-              borderRadius: 12,
-              paddingHorizontal: 14,
-              paddingVertical: 12,
-              backgroundColor: emphasized ? native.fillPressed : native.fill,
-              opacity: disabled || submitting ? 0.5 : 1,
-            }}
-          >
-            <Text
-              style={{
-                color: tokens.foreground,
-                fontSize: 15,
-                fontWeight: emphasized ? "600" : "400",
-              }}
-            >
-              {pendingAction === action.id
-                ? t("Sending…")
-                : Object.hasOwn(KNOWN_ASK_ACTION_LABELS, action.id)
-                  ? t(KNOWN_ASK_ACTION_LABELS[action.id]!)
-                  : action.label}
-            </Text>
-          </Pressable>
-        );
-      })}
+        })}
+      </View>
     </View>
   );
 }

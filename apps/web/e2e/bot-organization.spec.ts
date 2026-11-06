@@ -61,6 +61,47 @@ test("pinned bots and sidebar sections persist", async ({ page }, testInfo) => {
   await expect(sidebar.locator('[data-sidebar-group="unassigned"]')).toContainText("Chief");
 });
 
+test("deleting a section keeps its bots and groups", async ({ page }, testInfo) => {
+  await signup(page, `section-delete-${Date.now()}@rakazo.test`, "password12", "Section Delete");
+  await completeOnboarding(page);
+  const chiefId = activeBotId(page);
+  const alpha = await rpc<{ id: string }>(page, "bots/create", {
+    name: "Alpha",
+    computerMode: "team",
+  });
+  const section = await rpc<{ id: string }>(page, "botSections/create", {
+    botId: alpha.id,
+    name: "Projects",
+  });
+  await rpc(page, "bots/update", { botId: chiefId, sectionId: section.id });
+  const group = await rpc<{ id: string }>(page, "groups/create", {
+    name: "Review room",
+    botIds: [chiefId, alpha.id],
+  });
+  await rpc(page, "groups/update", { groupId: group.id, sectionId: section.id });
+  await page.reload();
+
+  const sidebar = page.locator("aside").first();
+  const sectionRows = sidebar.locator(`[data-sidebar-group="section:${section.id}"]`);
+  await sectionRows
+    .getByRole("button", { name: "Collapse Projects", exact: true })
+    .click({ button: "right" });
+  await page
+    .getByRole("menu", { name: "Actions for Projects" })
+    .getByRole("menuitem", { name: "Delete section", exact: true })
+    .click();
+  const dialog = page.getByRole("alertdialog", { name: "Delete Projects?" });
+  await expect(dialog).toContainText("Its bots and groups are kept and leave the section.");
+  await captureScreenshot(page, testInfo, "delete-section-dialog");
+  await dialog.getByRole("button", { name: "Delete", exact: true }).click();
+
+  await expect(sectionRows).toHaveCount(0);
+  for (const id of [chiefId, alpha.id]) {
+    await expect(sidebar.locator(`[data-roster-bot-id="${id}"]`)).toBeVisible();
+  }
+  await expect(sidebar.getByRole("button", { name: /^Review room/ })).toBeVisible();
+  await captureScreenshot(page, testInfo, "section-deleted");
+});
 test("bots can be reordered by drag or keyboard and keep that order", async ({ page }) => {
   const stamp = Date.now();
   await signup(page, `bot-reorder-${stamp}@rakazo.test`, "password12", "Bot Order");
@@ -71,7 +112,6 @@ test("bots can be reordered by drag or keyboard and keep that order", async ({ p
   const chiefId = activeBotId(page);
   const alpha = await rpc<{ id: string }>(page, "bots/create", {
     name: "Alpha",
-    title: "",
     description: "",
     instructions: "",
     notifyOnFinish: true,
@@ -79,7 +119,6 @@ test("bots can be reordered by drag or keyboard and keep that order", async ({ p
   });
   const beta = await rpc<{ id: string }>(page, "bots/create", {
     name: "Beta",
-    title: "",
     description: "",
     instructions: "",
     notifyOnFinish: true,
@@ -184,7 +223,7 @@ test("chat composer controls are vertically centered", async ({ page }, testInfo
   const bar = page.getByTestId("composer-bar");
   const composer = page.getByRole("combobox", { name: "Message Chief" });
   const centers = await bar.evaluate((composerBar) =>
-    ["Attach file", "Message Chief", "Voice", "Send"].map((label) => {
+    ["Attach file", "Message Chief", "Hold to talk", "Send"].map((label) => {
       const element = composerBar.querySelector<HTMLElement>(`[aria-label="${label}"]`);
       if (!element) throw new Error(`Missing composer control: ${label}`);
       const box = element.getBoundingClientRect();
@@ -206,7 +245,7 @@ test("chat composer controls are vertically centered", async ({ page }, testInfo
   await expect
     .poll(() =>
       bar.evaluate((composerBar) => {
-        const field = composerBar.querySelector("textarea")?.parentElement ?? null;
+        const field = composerBar.querySelector('[data-testid="composer-field"]');
         return [composerBar, field].every(
           (element) =>
             element?.getAnimations().every((animation) => animation.playState !== "running") ??
@@ -257,7 +296,6 @@ test("group chats share every context-menu action", async ({ page }, testInfo) =
   const chiefId = activeBotId(page);
   const partner = await rpc<{ id: string }>(page, "bots/create", {
     name: "Partner",
-    title: "",
     description: "",
     instructions: "",
     notifyOnFinish: true,

@@ -1,6 +1,12 @@
 import { useLingui } from "@lingui/react/macro";
 import type { ReplyPreview, ThreadMessage } from "@rakazo/contracts";
-import { formatTimeSeparator, isPeerReceiptBlocks, replyLabel } from "@rakazo/core";
+import {
+  formatTimeSeparator,
+  isPageOriginReply,
+  isPeerReceiptBlocks,
+  replyLabel,
+} from "@rakazo/core";
+import { cn } from "@rakazo/ui-web";
 import { X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { ArtifactTarget } from "../../lib/artifact-open";
@@ -69,6 +75,24 @@ export function TimeSeparator({ createdAt, locale }: { createdAt: string; locale
   );
 }
 
+/** Marks where the messages the user hadn't seen yet begin. */
+export function UnreadDivider({ afterSeparator = false }: { afterSeparator?: boolean }) {
+  const { t } = useLingui();
+  return (
+    <div
+      data-testid="unread-divider"
+      className={`flex select-none items-center gap-2.5 pb-2 ${afterSeparator ? "pt-0" : "pt-3.5"}`}
+    >
+      <span aria-hidden="true" className="h-px flex-1 bg-unread opacity-50" />
+      <span className="text-[12px] leading-4 font-semibold uppercase tracking-[0.5px] text-unread">
+        <span aria-hidden="true">{t`New`}</span>
+        <span className="sr-only">{t`New messages`}</span>
+      </span>
+      <span aria-hidden="true" className="h-px flex-1 bg-unread opacity-50" />
+    </div>
+  );
+}
+
 export function ComposerReplyPreview({
   author,
   text,
@@ -87,7 +111,12 @@ export function ComposerReplyPreview({
   const { t } = useLingui();
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !event.defaultPrevented) {
+      if (
+        event.key === "Escape" &&
+        !event.defaultPrevented &&
+        !event.isComposing &&
+        event.keyCode !== 229
+      ) {
         event.preventDefault();
         onDismiss();
       }
@@ -134,14 +163,17 @@ export function ReplyLine({
 }) {
   const { t } = useLingui();
   // Peer receipts use internal reply links for routing; their bodies belong in the peer view.
-  if (isPeerReceiptBlocks(message.blocks)) return null;
+  if (isPeerReceiptBlocks(message.blocks) || isPageOriginReply(message)) return null;
   if (!message.replyToMessageId && message.replyQuote == null) return null;
   const unavailable = message.replyPreview === null || !message.replyToMessageId;
   if (unavailable)
     return (
       <div
         data-testid="reply-parent-preview"
-        className="mb-1 truncate text-xs text-muted-foreground"
+        className={cn(
+          "mb-1 truncate text-xs text-muted-foreground",
+          message.role === "user" && "text-end",
+        )}
       >{t`Original message unavailable`}</div>
     );
   const attachment = message.replyPreview?.attachment;
@@ -152,24 +184,27 @@ export function ReplyLine({
     { photo: t`Photo`, attachment: t`Attachment` },
   );
   const excerpt = text.replace(/\s+/gu, " ").slice(0, 120);
+  // The wrapper aligns in the frame's direction; the quote keeps its own text direction.
   return (
-    <button
-      type="button"
-      data-testid="reply-parent-preview"
-      aria-label={t`Jump to replied message: ${excerpt}`}
-      onClick={() => {
-        if (message.replyToMessageId) onJump?.(message.replyToMessageId);
-      }}
-      className="mb-1 flex max-w-full items-center gap-1 text-start text-xs text-muted-foreground hover:text-foreground"
-      dir="auto"
-    >
-      <span aria-hidden="true">↩ </span>
-      {attachment?.kind === "image" && target ? (
-        <ReplyThumbnail attachment={attachment} target={target} lazy />
-      ) : null}
-      <span className="min-w-0 truncate">
-        {author}: {text}
-      </span>
-    </button>
+    <div className={cn("flex", message.role === "user" && "justify-end")}>
+      <button
+        type="button"
+        data-testid="reply-parent-preview"
+        aria-label={t`Jump to replied message: ${excerpt}`}
+        onClick={() => {
+          if (message.replyToMessageId) onJump?.(message.replyToMessageId);
+        }}
+        className="mb-1 flex min-w-0 max-w-full items-center gap-1 text-start text-xs text-muted-foreground hover:text-foreground"
+        dir="auto"
+      >
+        <span aria-hidden="true">↩ </span>
+        {attachment?.kind === "image" && target ? (
+          <ReplyThumbnail attachment={attachment} target={target} lazy />
+        ) : null}
+        <span className="min-w-0 truncate">
+          {author}: {text}
+        </span>
+      </button>
+    </div>
   );
 }
