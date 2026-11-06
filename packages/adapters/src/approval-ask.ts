@@ -164,6 +164,23 @@ export function buildApprovalAskBlock(
     secrets,
   );
   const safeDetail = detail ? redactSecrets(detail, secrets) : undefined;
+  const normalizedToolName = toolName.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  const outboundEmail =
+    /(?:^|_)(gmail|outlook|microsoft_outlook)(?:_|$)/.test(normalizedToolName) &&
+    /(?:^|_)(send|reply|forward|deliver)(?:_|$)/.test(normalizedToolName);
+  if (outboundEmail) {
+    return {
+      kind: "ask",
+      approvalEffectId: effectId,
+      text: "Send this email?",
+      detail: safeDetail ? truncate(safeDetail, MAX_APPROVAL_DETAIL_LENGTH) : undefined,
+      status: "pending",
+      actions: [
+        { id: "allow", label: "Approve this email" },
+        { id: "deny", label: "Do not send" },
+      ],
+    };
+  }
   return {
     kind: "ask",
     approvalEffectId: effectId,

@@ -311,14 +311,16 @@ export function botsRoutes(ctx: RouterContext) {
         let bot: Bot;
         try {
           // Older apps always send Original, which would pin every new bot to it.
-          const { avatarSet: _ignored, ...request } = input;
+          const { avatarSet: _ignored, skipIntro: _skipIntro, ...request } = input;
           bot = await repos.createBot(context.actor, request);
         } catch (error) {
           throw mapSpaceLifecycleError(error);
         }
-        await enqueueBotIntroRun(deps, context.actor, bot).catch((error) => {
-          getLogger().error("bot intro run enqueue", error);
-        });
+        if (!input.skipIntro) {
+          await enqueueBotIntroRun(deps, context.actor, bot).catch((error) => {
+            getLogger().error("bot intro run enqueue", error);
+          });
+        }
         return bot;
       }),
       importPreview: authed.bots.importPreview.handler(async ({ context, input }) =>

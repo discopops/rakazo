@@ -866,6 +866,66 @@ describe("connector read-only metadata and approval enforcement", () => {
     expect(f.results.at(-1)).toEqual({ error: "path is required" });
   });
 
+  it("requires individual owner approval for email sends even with an always-allow rule", async () => {
+    const f = fixture({
+      name: "GMAIL_SEND_EMAIL",
+      readOnly: false,
+      autoReview: true,
+      rules: [{ effect: "always_allow", matchKind: "tool", matchValue: "GMAIL_SEND_EMAIL" }],
+    });
+    f.setCalls([
+      {
+        args: { to: "person@example.test", subject: "Hi", body: "One message" },
+        executionId: "one",
+      },
+    ]);
+    await f.run();
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+    expect(f.pauseRunForInput).toHaveBeenCalledWith(
+      expect.objectContaining({
+        blocks: [
+          expect.objectContaining({
+            actions: [
+              { id: "allow", label: "Approve this email" },
+              { id: "deny", label: "Do not send" },
+            ],
+          }),
+        ],
+      }),
+    );
+    expect(reviewMock).not.toHaveBeenCalled();
+  });
+
+  it("blocks Composio batches containing outbound emails before calling the provider", async () => {
+    const f = fixture({
+      name: "COMPOSIO_MULTI_EXECUTE_TOOL",
+      readOnly: false,
+      batch: { items: "tools", action: "tool_slug", arguments: "arguments" },
+    });
+    f.setCalls([
+      {
+        args: {
+          tools: [
+            {
+              tool_slug: "GMAIL_SEND_EMAIL",
+              arguments: {
+                to: "person@example.test",
+                subject: "Hi",
+                body: "Message",
+              },
+            },
+          ],
+        },
+        executionId: "one",
+      },
+    ]);
+    await f.run();
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
+    expect(f.results.some((r) => JSON.stringify(r).includes("direct tool call"))).toBe(true);
+  });
+
   describe.each([false, true])("catalog = %s", (catalog) => {
     it.each(["tool", "connector"] as const)(
       "honors an explicit %s approval rule",

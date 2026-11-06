@@ -421,6 +421,8 @@ export const CreateBotInput = z.object({
   description: z.string().max(BOT_DESCRIPTION_MAX_LENGTH).default(""),
   instructions: z.string().max(BOT_INSTRUCTIONS_MAX_LENGTH).default(""),
   notifyOnFinish: z.boolean().default(true),
+  /** Create dormant specialist templates without an automatic introduction run. */
+  skipIntro: z.boolean().default(false),
   dailyCheckIns: z.boolean().optional(),
   fleetManagement: z.boolean().optional(),
   color: BotAvatarValueSchema.optional(),

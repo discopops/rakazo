@@ -14,6 +14,7 @@ import { KubernetesSandboxProvider } from "./kubernetes-sandbox.js";
 import { NoneSandboxProvider } from "./none-sandbox.js";
 import { NovitaSandboxProvider } from "./novita-sandbox.js";
 import { RailwaySandboxProvider } from "./railway-sandbox.js";
+import { SshSandboxProvider } from "./ssh-sandbox.js";
 
 export interface SandboxProviderOptions {
   hostComputerUrl?: string;
@@ -69,6 +70,12 @@ export interface SandboxProviderOptions {
   wuyingMcpUrl?: string;
   wuyingMcpToken?: string;
   dataDir?: string;
+  sshHost?: string;
+  sshUser?: string;
+  sshIdentityFile?: string;
+  sshPort?: string;
+  sshRemoteRoot?: string;
+  sshAllowedBotId?: string;
 }
 
 function missingRemoteKey(
@@ -97,7 +104,7 @@ export async function createSandboxProvider(
   const parsed = SandboxKind.safeParse(kind);
   if (!parsed.success) {
     throw new Error(
-      `Unknown SANDBOX_PROVIDER "${kind}". Use none | docker | e2b | novita | daytona | createos | boat | boxd | railway | kubernetes | incus | wuying | desktop | fake.`,
+      `Unknown SANDBOX_PROVIDER "${kind}". Use none | docker | e2b | novita | daytona | createos | boat | boxd | railway | kubernetes | incus | wuying | ssh | desktop | fake.`,
     );
   }
   const sandboxKind = parsed.data;
@@ -203,6 +210,19 @@ export async function createSandboxProvider(
         referenceInUse: opts.referenceInUse,
       });
     }
+    case "ssh":
+      if (!opts.sshHost?.trim() || !opts.sshUser?.trim() || !opts.sshIdentityFile?.trim())
+        return new NoneSandboxProvider(
+          "Computers unavailable: SSH_SANDBOX_HOST, SSH_SANDBOX_USER, and SSH_SANDBOX_IDENTITY_FILE are required.",
+        );
+      return new SshSandboxProvider({
+        host: opts.sshHost,
+        user: opts.sshUser,
+        identityFile: opts.sshIdentityFile,
+        port: opts.sshPort ? Number(opts.sshPort) : undefined,
+        remoteRoot: opts.sshRemoteRoot,
+        allowedBotId: opts.sshAllowedBotId,
+      });
     case "docker":
       return new DockerSandboxProvider(
         opts.supervisorUrl ?? "http://127.0.0.1:7091",
@@ -218,7 +238,7 @@ export async function createSandboxProvider(
     default: {
       const _exhaustive: never = sandboxKind;
       throw new Error(
-        `Unknown SANDBOX_PROVIDER "${_exhaustive}". Use none | docker | e2b | novita | daytona | createos | boat | boxd | railway | kubernetes | incus | wuying | desktop | fake.`,
+        `Unknown SANDBOX_PROVIDER "${_exhaustive}". Use none | docker | e2b | novita | daytona | createos | boat | boxd | railway | kubernetes | incus | wuying | ssh | desktop | fake.`,
       );
     }
   }

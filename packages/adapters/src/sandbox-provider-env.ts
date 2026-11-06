@@ -6,6 +6,13 @@ export function resolveSandboxProvider(source: NodeJS.ProcessEnv = process.env):
   if (configured !== undefined && !configured.trim()) return "none";
   const requested = configured?.trim() || "docker";
   if (requested === "none") return "none";
+  if (
+    requested === "ssh" &&
+    (!optional(source.SSH_SANDBOX_HOST) ||
+      !optional(source.SSH_SANDBOX_USER) ||
+      !optional(source.SSH_SANDBOX_IDENTITY_FILE))
+  )
+    return "none";
   if (requested === "e2b" && !optional(source.E2B_API_KEY)) return "none";
   if (requested === "novita" && !optional(source.NOVITA_API_KEY)) return "none";
   if (requested === "daytona" && !optional(source.DAYTONA_API_KEY)) return "none";
@@ -100,6 +107,12 @@ export function sandboxProviderOptionsFromEnv(
   | "wuyingEndUserId"
   | "wuyingMcpUrl"
   | "wuyingMcpToken"
+  | "sshHost"
+  | "sshUser"
+  | "sshIdentityFile"
+  | "sshPort"
+  | "sshRemoteRoot"
+  | "sshAllowedBotId"
 > {
   return {
     hostComputerUrl: source.SANDBOX_HOST_URL,
@@ -163,6 +176,12 @@ export function sandboxProviderOptionsFromEnv(
     wuyingEndUserId: optional(source.WUYING_END_USER_ID),
     wuyingMcpUrl: optional(source.WUYING_MCP_URL),
     wuyingMcpToken: optional(source.WUYING_MCP_TOKEN),
+    sshHost: source.SSH_SANDBOX_HOST,
+    sshUser: source.SSH_SANDBOX_USER,
+    sshIdentityFile: source.SSH_SANDBOX_IDENTITY_FILE,
+    sshPort: source.SSH_SANDBOX_PORT,
+    sshRemoteRoot: source.SSH_SANDBOX_ROOT,
+    sshAllowedBotId: source.SSH_SANDBOX_ALLOWED_BOT_ID,
   };
 }
 
