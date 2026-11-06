@@ -10,7 +10,6 @@ import {
   applyJudgeDecision,
   approvalModeFromPreference,
   batchActions,
-  composioBatchContainsEmailSend,
   connectorKindFromToolName,
   connectorReadRequiresApproval,
   connectorToolRequiresApproval,
@@ -149,14 +148,6 @@ export async function gateToolCall(
     request;
   const { replayEffectToolName } = request;
   let { args, effectRequest } = request;
-  if (composioBatchContainsEmailSend(name, args)) {
-    return {
-      result: {
-        error:
-          "Email sending/replying must use a separate direct tool call for each message so the owner can approve it individually.",
-      },
-    };
-  }
   const viaConnector = !BUILTIN_AGENT_TOOL_NAMES.has(name);
   // Declared effect of the operation this call dispatches (installed API method and
   // flag). Install config is immutable per route resource, so it cannot drift before

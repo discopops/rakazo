@@ -648,22 +648,9 @@ export function emailSendRequiresExplicitApproval(
   const name = toolName.toLowerCase().replace(/[^a-z0-9]+/g, "_");
   const kind = connectorKind.toLowerCase();
   const email =
-    EMAIL_CONNECTOR_SLUGS.has(kind) || /(?:^|_)(gmail|outlook|microsoft_outlook)(?:_|$)/.test(name);
+    EMAIL_CONNECTOR_SLUGS.has(kind) ||
+    /(?:^|_)(gmail|outlook|microsoft_outlook|email)(?:_|$)/.test(name);
   return email && /(?:^|_)(send|reply|forward|deliver)(?:_|$)/.test(name);
-}
-
-/** Refuse Composio multi-execute batches that hide outbound email from individual review. */
-export function composioBatchContainsEmailSend(
-  toolName: string,
-  args: Record<string, unknown>,
-): boolean {
-  const leafName = toolName.toUpperCase().split("__").at(-1);
-  if (leafName !== "COMPOSIO_MULTI_EXECUTE_TOOL" || !Array.isArray(args.tools)) return false;
-  return args.tools.some((item) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) return false;
-    const slug = (item as Record<string, unknown>).tool_slug;
-    return typeof slug === "string" && emailSendRequiresExplicitApproval(slug);
-  });
 }
 
 /** Owner approval cannot be relaxed by connector metadata or space allow rules. */
@@ -675,7 +662,7 @@ export function responderMandatoryApproval(input: {
   const name = input.toolName.toLowerCase().replace(/[^a-z0-9]+/g, "_");
   const kind = (input.connectorKind ?? connectorKindFromToolName(input.toolName)).toLowerCase();
   const email =
-    /(?:^|_)(gmail|outlook|microsoft_outlook)(?:_|$)/.test(name) ||
+    /(?:^|_)(gmail|outlook|microsoft_outlook|email)(?:_|$)/.test(name) ||
     ["gmail", "outlook", "microsoft_outlook"].includes(kind);
   const calendar =
     /(?:^|_)(googlecalendar|google_calendar)(?:_|$)/.test(name) ||

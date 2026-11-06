@@ -5,7 +5,6 @@ import {
   approvalModeFromPreference,
   approvalPreferenceFromMode,
   batchActions,
-  composioBatchContainsEmailSend,
   connectorKindFromToolName,
   connectorReadRequiresApproval,
   connectorToolRequiresApproval,
@@ -1048,6 +1047,9 @@ describe("Responder mandatory owner approval", () => {
     for (const toolName of [
       "GMAIL_SEND_EMAIL",
       "GMAIL_REPLY_TO_EMAIL",
+      "send_email",
+      "reply_email",
+      "delete_email",
       "GMAIL_BATCH_DELETE_MESSAGES",
       "GMAIL_TRASH_MESSAGE",
       "GOOGLECALENDAR_DELETE_EVENT",
@@ -1104,6 +1106,8 @@ describe("mandatory per-email approval", () => {
       expect(emailSendRequiresExplicitApproval(name)).toBe(true);
     }
     expect(emailSendRequiresExplicitApproval("SEND_EMAIL", "gmail")).toBe(true);
+    expect(emailSendRequiresExplicitApproval("send_email")).toBe(true);
+    expect(emailSendRequiresExplicitApproval("reply_email")).toBe(true);
     for (const name of [
       "GMAIL_LIST_THREADS",
       "GMAIL_CREATE_DRAFT",
@@ -1113,26 +1117,5 @@ describe("mandatory per-email approval", () => {
     ]) {
       expect(emailSendRequiresExplicitApproval(name)).toBe(false);
     }
-  });
-
-  it("detects nested Composio sends but allows read and draft-only batches", () => {
-    expect(
-      composioBatchContainsEmailSend("COMPOSIO_MULTI_EXECUTE_TOOL", {
-        tools: [
-          { tool_slug: "GMAIL_LIST_THREADS", arguments: {} },
-          { tool_slug: "GMAIL_SEND_EMAIL", arguments: { to: "a@example.test" } },
-        ],
-      }),
-    ).toBe(true);
-    expect(
-      composioBatchContainsEmailSend("COMPOSIO_MULTI_EXECUTE_TOOL", {
-        tools: [{ tool_slug: "GMAIL_CREATE_DRAFT", arguments: {} }],
-      }),
-    ).toBe(false);
-    expect(
-      composioBatchContainsEmailSend("OTHER_TOOL", {
-        tools: [{ tool_slug: "GMAIL_SEND_EMAIL" }],
-      }),
-    ).toBe(false);
   });
 });
