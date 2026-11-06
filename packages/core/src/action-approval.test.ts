@@ -5,10 +5,12 @@ import {
   approvalModeFromPreference,
   approvalPreferenceFromMode,
   batchActions,
+  composioBatchContainsEmailSend,
   connectorKindFromToolName,
   connectorReadRequiresApproval,
   connectorToolRequiresApproval,
   decisiveActionApprovalRules,
+  emailSendRequiresExplicitApproval,
   isApprovalAskBlock,
   isOwnerStartedRun,
   isSecretAskBlock,
@@ -1087,5 +1089,50 @@ describe("Responder mandatory owner approval", () => {
     expect(check({ toolName: "desktop_commander_start_process", args: { command: "pwd" } })).toBe(
       false,
     );
+  });
+});
+
+describe("mandatory per-email approval", () => {
+  it("recognizes outbound Gmail and Outlook actions but not draft creation", () => {
+    for (const name of [
+      "GMAIL_SEND_EMAIL",
+      "GMAIL_REPLY_TO_THREAD",
+      "GMAIL_SEND_DRAFT",
+      "OUTLOOK_SEND_EMAIL",
+      "MICROSOFT_OUTLOOK_FORWARD_MESSAGE",
+    ]) {
+      expect(emailSendRequiresExplicitApproval(name)).toBe(true);
+    }
+    expect(emailSendRequiresExplicitApproval("SEND_EMAIL", "gmail")).toBe(true);
+    for (const name of [
+      "GMAIL_LIST_THREADS",
+      "GMAIL_CREATE_DRAFT",
+      "GMAIL_UPDATE_DRAFT",
+      "GMAIL_GET_MESSAGE",
+      "SLACK_SEND_MESSAGE",
+    ]) {
+      expect(emailSendRequiresExplicitApproval(name)).toBe(false);
+    }
+  });
+
+  it("detects nested Composio sends but allows read and draft-only batches", () => {
+    expect(
+      composioBatchContainsEmailSend("COMPOSIO_MULTI_EXECUTE_TOOL", {
+        tools: [
+          { tool_slug: "GMAIL_LIST_THREADS", arguments: {} },
+          { tool_slug: "GMAIL_SEND_EMAIL", arguments: { to: "a@example.test" } },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      composioBatchContainsEmailSend("COMPOSIO_MULTI_EXECUTE_TOOL", {
+        tools: [{ tool_slug: "GMAIL_CREATE_DRAFT", arguments: {} }],
+      }),
+    ).toBe(false);
+    expect(
+      composioBatchContainsEmailSend("OTHER_TOOL", {
+        tools: [{ tool_slug: "GMAIL_SEND_EMAIL" }],
+      }),
+    ).toBe(false);
   });
 });

@@ -10,6 +10,7 @@ import {
   applyJudgeDecision,
   approvalModeFromPreference,
   batchActions,
+  composioBatchContainsEmailSend,
   connectorKindFromToolName,
   connectorReadRequiresApproval,
   connectorToolRequiresApproval,
@@ -87,6 +88,7 @@ type ApprovalCard = {
   reviewReason: string | undefined;
   summary: FleetCardSummary | undefined;
   batch: ToolBatch | undefined;
+  connectorKind?: string;
 };
 
 /** A tool call that passed its approval gate, as tool handlers receive it. */
@@ -147,6 +149,14 @@ export async function gateToolCall(
     request;
   const { replayEffectToolName } = request;
   let { args, effectRequest } = request;
+  if (composioBatchContainsEmailSend(name, args)) {
+    return {
+      result: {
+        error:
+          "Email sending/replying must use a separate direct tool call for each message so the owner can approve it individually.",
+      },
+    };
+  }
   const viaConnector = !BUILTIN_AGENT_TOOL_NAMES.has(name);
   // Declared effect of the operation this call dispatches (installed API method and
   // flag). Install config is immutable per route resource, so it cannot drift before
@@ -544,7 +554,14 @@ export async function gateToolCall(
     nextApprovedTool,
     bypassApproval: gateDecision === "allow" && gated,
   });
-  const card = { reviewReason, summary: request.fleetSummary, batch: connectorTool?.batch };
+  const card = {
+    reviewReason,
+    summary: request.fleetSummary
+      ? { ...request.fleetSummary, onceOnly: request.fleetSummary.onceOnly || protectedAction }
+      : undefined,
+    batch: connectorTool?.batch,
+    connectorKind,
+  };
 
   if (applied?.duplicate) {
     const gate = resolveDuplicateEffectGate(applied.effect, name);

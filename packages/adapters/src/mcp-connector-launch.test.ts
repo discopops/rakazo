@@ -357,7 +357,8 @@ describe("MCP connector managed stdio launch", () => {
       await publishPackage(root);
       env = { SILENT: "1" };
       const launches = vi.spyOn(McpSession.prototype, "connectStdio");
-      const connector = connectorFor({ startupTimeoutMs: 300, discoveryTimeoutMs: 5_000 });
+      // Keep enough startup headroom under the full suite's parallel test load.
+      const connector = connectorFor({ startupTimeoutMs: 3_000, discoveryTimeoutMs: 5_000 });
       try {
         expect(await connector.discoverTools(contextFor())).toMatchObject([
           { name: "mcp__mail__unavailable" },

@@ -3239,7 +3239,12 @@ describe("retry of an action a person denied in the same run", () => {
     f.effects.push(denied(WRAPPER, { tools: [{ tool_slug: "GMAIL_SEND_EMAIL", arguments: {} }] }));
     f.setCalls([batch("GMAIL_LIST_THREADS", "gmail_send_email")]);
     await f.run();
-    expect(f.results).toEqual([DENIED]);
+    expect(f.results).toEqual([
+      {
+        error:
+          "Email sending/replying must use a separate direct tool call for each message so the owner can approve it individually.",
+      },
+    ]);
     expect(f.execute).not.toHaveBeenCalled();
     expect(f.pauseRunForInput).not.toHaveBeenCalled();
   });
@@ -3254,7 +3259,7 @@ describe("retry of an action a person denied in the same run", () => {
     f.effects.push(
       denied(
         WRAPPER,
-        { tools: [{ tool_slug: "GMAIL_SEND_DRAFT" }] },
+        { tools: [{ tool_slug: "GMAIL_CREATE_DRAFT" }] },
         {
           id: "effect-r",
           idempotencyKey: "refused",
@@ -3262,7 +3267,7 @@ describe("retry of an action a person denied in the same run", () => {
         },
       ),
     );
-    f.setCalls([batch("GMAIL_SEND_DRAFT")]);
+    f.setCalls([batch("GMAIL_CREATE_DRAFT")]);
     await f.run();
     expect(f.execute).not.toHaveBeenCalled();
     expect(isApprovalPausedResult(f.results[0])).toBe(true);

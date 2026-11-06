@@ -640,6 +640,32 @@ export function isApprovalAskBlock(block: {
   );
 }
 
+/** Outbound email must always receive an individual, one-time owner decision. */
+export function emailSendRequiresExplicitApproval(
+  toolName: string,
+  connectorKind = connectorKindFromToolName(toolName),
+): boolean {
+  const name = toolName.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  const kind = connectorKind.toLowerCase();
+  const email =
+    EMAIL_CONNECTOR_SLUGS.has(kind) || /(?:^|_)(gmail|outlook|microsoft_outlook)(?:_|$)/.test(name);
+  return email && /(?:^|_)(send|reply|forward|deliver)(?:_|$)/.test(name);
+}
+
+/** Refuse Composio multi-execute batches that hide outbound email from individual review. */
+export function composioBatchContainsEmailSend(
+  toolName: string,
+  args: Record<string, unknown>,
+): boolean {
+  const leafName = toolName.toUpperCase().split("__").at(-1);
+  if (leafName !== "COMPOSIO_MULTI_EXECUTE_TOOL" || !Array.isArray(args.tools)) return false;
+  return args.tools.some((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+    const slug = (item as Record<string, unknown>).tool_slug;
+    return typeof slug === "string" && emailSendRequiresExplicitApproval(slug);
+  });
+}
+
 /** Owner approval cannot be relaxed by connector metadata or space allow rules. */
 export function responderMandatoryApproval(input: {
   toolName: string;
@@ -655,7 +681,7 @@ export function responderMandatoryApproval(input: {
     /(?:^|_)(googlecalendar|google_calendar)(?:_|$)/.test(name) ||
     ["googlecalendar", "google_calendar"].includes(kind);
   // Only outbound mail and deletion require mandatory owner approval.
-  if (email && /(?:^|_)(send|reply|forward|deliver)(?:_|$)/.test(name)) return true;
+  if (emailSendRequiresExplicitApproval(input.toolName, kind)) return true;
   if (
     (email || calendar) &&
     /(?:^|_)(delete|trash|untrash|empty_trash|remove|purge|erase|destroy|cancel)(?:_|$)/.test(name)

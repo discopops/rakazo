@@ -14,9 +14,8 @@ describe("buildApprovalAskBlock", () => {
       kind: "ask",
       approvalEffectId: "effect-1",
       actions: [
-        { id: "allow", label: "Allow once" },
-        { id: "always", label: "Always allow this tool" },
-        { id: "deny", label: "Deny" },
+        { id: "allow", label: "Approve this email" },
+        { id: "deny", label: "Do not send" },
       ],
     });
     expect(JSON.stringify(block)).not.toContain("token-secret");
@@ -337,4 +336,29 @@ describe("approval card arguments", () => {
     if (block.kind !== "ask") throw new Error("expected ask block");
     expect(block.detail?.split("\n")).toContain("to_email: f@example.test");
   });
+});
+
+it("keeps resolved outbound email cards one-time and labels the owner decision clearly", () => {
+  const block = buildApprovalAskBlock(
+    "effect-send-1",
+    "GMAIL_SEND_EMAIL",
+    { to: "recipient@example.test", subject: "Hello", body: "Approved content" },
+    [],
+    {
+      connectorKind: "gmail",
+      summary: {
+        title: "Review before GMAIL_SEND_EMAIL → recipient@example.test",
+        lines: ["to: recipient@example.test", "subject: Hello", "body: Approved content"],
+        onceOnly: true,
+      },
+    },
+  );
+  expect(block).toMatchObject({
+    approvalEffectId: "effect-send-1",
+    actions: [
+      { id: "allow", label: "Approve this email" },
+      { id: "deny", label: "Do not send" },
+    ],
+  });
+  expect(JSON.stringify(block)).not.toContain('"always"');
 });
