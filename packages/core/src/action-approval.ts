@@ -639,3 +639,51 @@ export function isApprovalAskBlock(block: {
     [...actionIds].every((id) => id === "allow" || id === "always" || id === "deny")
   );
 }
+
+/** Owner approval cannot be relaxed by connector metadata or space allow rules. */
+export function responderMandatoryApproval(input: {
+  toolName: string;
+  args: Record<string, unknown>;
+  connectorKind?: string;
+}): boolean {
+  const name = input.toolName.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  const kind = (input.connectorKind ?? connectorKindFromToolName(input.toolName)).toLowerCase();
+  const email =
+    /(?:^|_)(gmail|outlook|microsoft_outlook)(?:_|$)/.test(name) ||
+    ["gmail", "outlook", "microsoft_outlook"].includes(kind);
+  const calendar =
+    /(?:^|_)(googlecalendar|google_calendar)(?:_|$)/.test(name) ||
+    ["googlecalendar", "google_calendar"].includes(kind);
+  // Only outbound mail and deletion require mandatory owner approval.
+  if (email && /(?:^|_)(send|reply|forward|deliver)(?:_|$)/.test(name)) return true;
+  if (
+    (email || calendar) &&
+    /(?:^|_)(delete|trash|untrash|empty_trash|remove|purge|erase|destroy|cancel)(?:_|$)/.test(name)
+  )
+    return true;
+  if (email || calendar) {
+    const payload = JSON.stringify(input.args).toLowerCase();
+    if (email && /"trash"/.test(payload)) return true;
+    if (calendar && /"status"\s*:\s*"cancell?ed"/.test(payload)) return true;
+  }
+  const desktop = /desktop_?commander/.test(name) || /desktop.?commander/.test(kind);
+  if (desktop || name === "shell") {
+    if (/(?:^|_)(delete|remove|trash|unlink|rmdir|empty_trash|force_terminate)(?:_|$)/.test(name))
+      return true;
+    if (
+      /(?:^|_)(move_file|rename_file|copy_file)(?:_|$)/.test(name) &&
+      (input.args.overwrite === true || input.args.replace === true)
+    )
+      return true;
+    if (
+      name === "shell" ||
+      /(?:^|_)(start_process|interact_with_process|execute_command|execute_code|terminal|shell|kill_process)(?:_|$)/.test(
+        name,
+      )
+    ) {
+      const command = String(input.args.command ?? input.args.cmd ?? "").trim();
+      return !/^(?:pwd|whoami|id|date|uname)(?:\s+-[a-zA-Z]+)?$/.test(command);
+    }
+  }
+  return false;
+}

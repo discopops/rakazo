@@ -22,6 +22,7 @@ import {
   redactSecrets,
   repeatsDeniedAction,
   resolveActionApprovalForTools,
+  responderMandatoryApproval,
   SITE_SENDING_TOOLS,
   toolRequiresApproval,
   toolRequiresExplicitApproval,
@@ -267,12 +268,30 @@ export async function gateToolCall(
       ));
   // A gated read still fails closed when its review errors, and keeps its approval key.
   const gated = requiresApprovalByDefault || connectorReadGated;
+  // Protected actions require an individual owner decision, regardless of allow rules.
+  // Reject protected batches rather than letting a single approval cover multiple effects.
+  const protectedAction = approvalToolNames.some((toolName) =>
+    responderMandatoryApproval({
+      toolName,
+      args,
+      connectorKind: connectorKindFromToolName(toolName, connectorProviders),
+    }),
+  );
+  if (batch && protectedAction) {
+    return {
+      result: {
+        error:
+          "Protected email or destructive actions must be separate direct tool calls for individual owner approval.",
+      },
+    };
+  }
   const requiresMandatoryApproval =
     paying ||
     commandWatch ||
     scheduleNamesNewSite ||
     requiresUnattendedApproval ||
-    toolRequiresExplicitApproval(name);
+    toolRequiresExplicitApproval(name) ||
+    protectedAction;
   // Never ask runs everything else: only another owner's connection could have been steered into it.
   const guardedInNeverAsk = name === "respond_agent_connection";
   const resolvedRules = resolveActionApprovalForTools({
@@ -326,22 +345,26 @@ export async function gateToolCall(
             ),
           )
         : false));
-  const plan = USER_COMPUTER_TOOLS.has(name)
-    ? await userComputerGate(ctx, approvalResolved.decision === "deny", name, args)
-    : planActionGate({
-        resolved: approvalResolved,
-        mode,
-        mandatory: requiresMandatoryApproval,
-        steerable:
-          guardedInNeverAsk && mode === "never"
-            ? !ctx.source.ownerStartedRun || (await isRunTainted(ctx))
-            : undefined,
-        consequential: requiresApprovalByDefault,
-        reviewOnly: connectorReadGated,
-        checkerConfigured,
-        newDestination: siteGate === "new",
-        purchase: paying,
-      });
+  const plan = protectedAction
+    ? mode === "never"
+      ? ("deny" as const)
+      : ("ask" as const)
+    : USER_COMPUTER_TOOLS.has(name)
+      ? await userComputerGate(ctx, approvalResolved.decision === "deny", name, args)
+      : planActionGate({
+          resolved: approvalResolved,
+          mode,
+          mandatory: requiresMandatoryApproval,
+          steerable:
+            guardedInNeverAsk && mode === "never"
+              ? !ctx.source.ownerStartedRun || (await isRunTainted(ctx))
+              : undefined,
+          consequential: requiresApprovalByDefault,
+          reviewOnly: connectorReadGated,
+          checkerConfigured,
+          newDestination: siteGate === "new",
+          purchase: paying,
+        });
   // Nobody is there to approve a purchase a webhook run reaches.
   if (paying && run.trigger === "webhook" && plan !== "deny") {
     await auditToolCall(ctx, name, "denied", { reason: "purchase_unattended" });

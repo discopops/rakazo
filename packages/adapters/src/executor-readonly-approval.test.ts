@@ -1285,7 +1285,7 @@ describe("Composio batches", () => {
     });
 
   it.each([false, true])(
-    "asks for a send after an archive was always allowed (catalog = %s)",
+    "rejects a send batch after an archive was always allowed (catalog = %s)",
     async (catalog) => {
       const f = batchFixture({
         catalog,
@@ -1297,11 +1297,11 @@ describe("Composio batches", () => {
       f.setCalls([{ args: batch("GMAIL_SEND_EMAIL"), executionId: "call-2" }]);
       await f.run();
       expect(f.execute).toHaveBeenCalledOnce();
-      expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+      expect(f.pauseRunForInput).not.toHaveBeenCalled();
     },
   );
 
-  it("sends a send in the batch to Auto Review even with the batch tool always allowed", async () => {
+  it("rejects a send batch before Auto Review even with the batch tool always allowed", async () => {
     reviewMock.mockResolvedValue({ decision: "ask", reason: "Not asked to send", model: "mock" });
     const f = batchFixture({
       autoReview: true,
@@ -1311,12 +1311,12 @@ describe("Composio batches", () => {
     });
     f.setCalls([{ args: batch("GMAIL_SEND_EMAIL"), executionId: "call-1" }]);
     await f.run();
-    expect(reviewMock).toHaveBeenCalledOnce();
+    expect(reviewMock).not.toHaveBeenCalled();
     expect(f.execute).not.toHaveBeenCalled();
-    expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
   });
 
-  it("matches tool and category rules on the actions, whatever the batch tool is called", async () => {
+  it("rejects protected actions regardless of tool and category rules or batch name", async () => {
     for (const rule of [
       { effect: "require_approval", matchKind: "tool", matchValue: "GMAIL_SEND_EMAIL" },
       { effect: "require_approval", matchKind: "category", matchValue: "email" },
@@ -1329,11 +1329,11 @@ describe("Composio batches", () => {
       f.setCalls([{ args: batch("GMAIL_SEND_EMAIL"), executionId: "call-1" }]);
       await f.run();
       expect(reviewMock).not.toHaveBeenCalled();
-      expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+      expect(f.pauseRunForInput).not.toHaveBeenCalled();
     }
   });
 
-  it("records the actions an Always allow on the card would save", async () => {
+  it("does not record approval effects for protected batches", async () => {
     const f = batchFixture();
     f.setCalls([
       { args: batch("GMAIL_ARCHIVE_THREAD", "GMAIL_SEND_EMAIL"), executionId: "call-1" },
@@ -1341,10 +1341,8 @@ describe("Composio batches", () => {
     await f.run();
     f.setCalls([{ args: batch("GMAIL_SEND_EMAIL", undefined), executionId: "call-2" }]);
     await f.run();
-    expect(f.effects.map((effect) => effect.batchActions)).toEqual([
-      ["GMAIL_ARCHIVE_THREAD", "GMAIL_SEND_EMAIL"],
-      [],
-    ]);
+    expect(f.effects).toHaveLength(0);
+    expect(f.execute).not.toHaveBeenCalled();
   });
 
   it("asks when the batch lists no actions", async () => {
@@ -1359,7 +1357,7 @@ describe("Composio batches", () => {
     expect(f.pauseRunForInput).toHaveBeenCalledOnce();
   });
 
-  it("runs a batch whose every action is allowed", async () => {
+  it("runs an allowed Gmail archive batch", async () => {
     const f = batchFixture({
       rules: [{ effect: "always_allow", matchKind: "tool", matchValue: "gmail_archive_thread" }],
     });
@@ -1369,7 +1367,7 @@ describe("Composio batches", () => {
     expect(f.pauseRunForInput).not.toHaveBeenCalled();
   });
 
-  it("asks when one action in the batch is not allowed", async () => {
+  it("rejects when one action in the batch is protected", async () => {
     const f = batchFixture({
       rules: [{ effect: "always_allow", matchKind: "tool", matchValue: "gmail_archive_thread" }],
     });
@@ -1378,7 +1376,7 @@ describe("Composio batches", () => {
     ]);
     await f.run();
     expect(f.execute).not.toHaveBeenCalled();
-    expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
   });
 
   it("refuses the whole batch when one action is blocked, even in Never ask", async () => {
@@ -1395,7 +1393,7 @@ describe("Composio batches", () => {
     expect(JSON.stringify(f.results[0])).toContain("blocked");
   });
 
-  it("never lets an allow rule on the batch tool cover the actions in it", async () => {
+  it("never lets an allow rule on the batch tool execute protected actions", async () => {
     const f = batchFixture({
       rules: [
         { effect: "always_allow", matchKind: "tool", matchValue: "composio_multi_execute_tool" },
@@ -1404,10 +1402,10 @@ describe("Composio batches", () => {
     f.setCalls([{ args: batch("GMAIL_SEND_EMAIL"), executionId: "call-1" }]);
     await f.run();
     expect(f.execute).not.toHaveBeenCalled();
-    expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
   });
 
-  it("asks when an entry names no action, even under allow rules", async () => {
+  it("asks when a batch contains an unidentified action", async () => {
     const f = batchFixture({
       rules: [{ effect: "always_allow", matchKind: "tool", matchValue: "gmail_archive_thread" }],
     });
@@ -1417,17 +1415,12 @@ describe("Composio batches", () => {
     expect(f.pauseRunForInput).toHaveBeenCalledOnce();
   });
 
-  it("names the actions in the batch on the approval card", async () => {
+  it("does not create an approval card for protected batches", async () => {
     const f = batchFixture();
     f.setCalls([{ args: batch("GMAIL_SEND_EMAIL", undefined), executionId: "call-1" }]);
     await f.run();
-    const card = (
-      f.pauseRunForInput.mock.calls as unknown as [{ blocks: Array<Record<string, unknown>> }][]
-    )[0]?.[0].blocks[0];
-    expect(card).toMatchObject({
-      text: "Review before GMAIL_SEND_EMAIL, …",
-      detail: "GMAIL_SEND_EMAIL\nto: a@example.com\n…",
-    });
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
   });
 
   it("keeps read trust to the app a batch reached", async () => {
@@ -3853,5 +3846,62 @@ describe("a click that completes a purchase on a website", () => {
     await f.run();
     expect(page.acts).toEqual([]);
     expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+  });
+});
+
+describe("Responder protected-action integration", () => {
+  beforeEach(() => reviewMock.mockReset());
+
+  it("requires owner approval despite an always-allow rule and auto-review", async () => {
+    const f = fixture({
+      name: "GMAIL_SEND_EMAIL",
+      readOnly: false,
+      autoReview: true,
+      rules: [{ effect: "always_allow", matchKind: "tool", matchValue: "GMAIL_SEND_EMAIL" }],
+    });
+    await f.run();
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(reviewMock).not.toHaveBeenCalled();
+    expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+  });
+
+  it("denies protected send in Never ask mode", async () => {
+    const f = fixture({
+      name: "GMAIL_SEND_EMAIL",
+      readOnly: false,
+      skipApprovals: true,
+      rules: [{ effect: "always_allow", matchKind: "tool", matchValue: "GMAIL_SEND_EMAIL" }],
+    });
+    await f.run();
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
+  });
+
+  it("rejects protected multi-action batches before any execution or review", async () => {
+    const f = fixture({
+      name: "COMPOSIO_MULTI_EXECUTE_TOOL",
+      readOnly: false,
+      autoReview: true,
+      batch: { items: "tools", action: "tool_slug", arguments: "arguments" },
+      rules: [
+        { effect: "always_allow", matchKind: "tool", matchValue: "COMPOSIO_MULTI_EXECUTE_TOOL" },
+      ],
+    });
+    f.setCalls([
+      {
+        args: {
+          id: "batch",
+          tools: [
+            { tool_slug: "GMAIL_LIST_THREADS", arguments: {} },
+            { tool_slug: "GMAIL_SEND_EMAIL", arguments: { to: "a@example.com" } },
+          ],
+        },
+        executionId: "call-1",
+      },
+    ]);
+    await f.run();
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(reviewMock).not.toHaveBeenCalled();
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
   });
 });

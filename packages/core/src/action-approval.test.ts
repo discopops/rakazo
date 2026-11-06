@@ -1039,3 +1039,53 @@ describe("repeatsDeniedAction", () => {
     expect(repeatsDeniedAction({ toolName: WRAPPER, args: {}, denied: [sent] })).toBe(false);
   });
 });
+
+describe("Responder mandatory owner approval", () => {
+  it("protects send and destructive connector actions regardless of hints", async () => {
+    const { responderMandatoryApproval: check } = await import("./action-approval.js");
+    for (const toolName of [
+      "GMAIL_SEND_EMAIL",
+      "GMAIL_REPLY_TO_EMAIL",
+      "GMAIL_BATCH_DELETE_MESSAGES",
+      "GMAIL_TRASH_MESSAGE",
+      "GOOGLECALENDAR_DELETE_EVENT",
+    ]) {
+      expect(check({ toolName, args: {} })).toBe(true);
+    }
+    expect(check({ toolName: "GMAIL_MODIFY_MESSAGE", args: { addLabelIds: ["TRASH"] } })).toBe(
+      true,
+    );
+    expect(check({ toolName: "GOOGLECALENDAR_UPDATE_EVENT", args: { status: "cancelled" } })).toBe(
+      true,
+    );
+    expect(check({ toolName: "GMAIL_LIST_MESSAGES", args: {} })).toBe(false);
+    expect(check({ toolName: "GMAIL_CREATE_DRAFT", args: {} })).toBe(false);
+    for (const toolName of [
+      "GMAIL_MODIFY_MESSAGE",
+      "GMAIL_ADD_LABEL_TO_EMAIL",
+      "GMAIL_ARCHIVE_EMAIL",
+      "GMAIL_UPDATE_DRAFT",
+    ]) {
+      expect(check({ toolName, args: {} })).toBe(false);
+    }
+    expect(check({ toolName: "GMAIL_GET_THREAD", args: {} })).toBe(false);
+    expect(check({ toolName: "GOOGLECALENDAR_UPDATE_EVENT", args: { status: "canceled" } })).toBe(
+      true,
+    );
+  });
+  it("protects indirect shell operations and overwrites", async () => {
+    const { responderMandatoryApproval: check } = await import("./action-approval.js");
+    expect(
+      check({
+        toolName: "desktop_commander_start_process",
+        args: { command: "python -c 'print(1)'" },
+      }),
+    ).toBe(true);
+    expect(check({ toolName: "desktop_commander_move_file", args: { overwrite: true } })).toBe(
+      true,
+    );
+    expect(check({ toolName: "desktop_commander_start_process", args: { command: "pwd" } })).toBe(
+      false,
+    );
+  });
+});
