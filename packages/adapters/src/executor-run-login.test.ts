@@ -250,6 +250,7 @@ async function runTool(
         if (options.printed) yield { type: "stdout" as const, data: options.printed };
         yield { type: "exit" as const, code: 0 };
       }),
+      readFile: vi.fn(async () => new TextEncoder().encode(options.printed ?? "")),
       async *exportWorkspace() {
         yield* [];
       },
@@ -540,7 +541,7 @@ describe("request_secret for a login saved for another site", () => {
 describe("this run's login that wasn't saved", () => {
   it("is hidden from what the run reads before the bot fills anything", async () => {
     const { toolResults } = await runTool(
-      { name: "shell", args: { command: "read-page" } },
+      { name: "read_file", args: { path: "page.txt" } },
       {
         secrets: [await runLogin("run-1")],
         printed: "field=fake-password-1 user=fake-user other=kept",

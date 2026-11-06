@@ -87,6 +87,7 @@ type ApprovalCard = {
   reviewReason: string | undefined;
   summary: FleetCardSummary | undefined;
   batch: ToolBatch | undefined;
+  connectorKind?: string;
 };
 
 /** A tool call that passed its approval gate, as tool handlers receive it. */
@@ -544,7 +545,14 @@ export async function gateToolCall(
     nextApprovedTool,
     bypassApproval: gateDecision === "allow" && gated,
   });
-  const card = { reviewReason, summary: request.fleetSummary, batch: connectorTool?.batch };
+  const card = {
+    reviewReason,
+    summary: request.fleetSummary
+      ? { ...request.fleetSummary, onceOnly: request.fleetSummary.onceOnly || protectedAction }
+      : undefined,
+    batch: connectorTool?.batch,
+    connectorKind,
+  };
 
   if (applied?.duplicate) {
     const gate = resolveDuplicateEffectGate(applied.effect, name);

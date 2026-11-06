@@ -4,6 +4,7 @@ import { BOT_INSTRUCTIONS_MAX_LENGTH } from "@rakazo/contracts";
 import {
   batchActions,
   CARD_TITLE_ESCAPED_CHARACTERS,
+  emailSendRequiresExplicitApproval,
   instructionUpdateDiff,
   messagingProviderName,
   redactSecrets,
@@ -38,10 +39,18 @@ export function buildApprovalAskBlock(
   toolName: string,
   args: Record<string, unknown>,
   secrets: string[],
-  options?: { reviewReason?: string; summary?: FleetCardSummary; batch?: ToolBatch },
+  options?: {
+    reviewReason?: string;
+    summary?: FleetCardSummary;
+    batch?: ToolBatch;
+    connectorKind?: string;
+  },
 ): MessageBlock {
   if (options?.summary) {
     // Built from what was resolved before the effect was recorded, not from what the model typed.
+    const outboundEmail = emailSendRequiresExplicitApproval(toolName, options.connectorKind);
+    const onceOnly =
+      toolRequiresExplicitApproval(toolName) || options.summary.onceOnly || outboundEmail;
     return {
       kind: "ask",
       approvalEffectId: effectId,
@@ -52,8 +61,12 @@ export function buildApprovalAskBlock(
       ),
       detailFormat: toolName === "set_child_instructions" ? "code" : "text",
       status: "pending",
-      actions:
-        toolRequiresExplicitApproval(toolName) || options.summary.onceOnly
+      actions: outboundEmail
+        ? [
+            { id: "allow", label: "Approve this email" },
+            { id: "deny", label: "Do not send" },
+          ]
+        : onceOnly
           ? [
               { id: "allow", label: "Allow once" },
               { id: "deny", label: "Deny" },
@@ -164,10 +177,7 @@ export function buildApprovalAskBlock(
     secrets,
   );
   const safeDetail = detail ? redactSecrets(detail, secrets) : undefined;
-  const normalizedToolName = toolName.toLowerCase().replace(/[^a-z0-9]+/g, "_");
-  const outboundEmail =
-    /(?:^|_)(gmail|outlook|microsoft_outlook)(?:_|$)/.test(normalizedToolName) &&
-    /(?:^|_)(send|reply|forward|deliver)(?:_|$)/.test(normalizedToolName);
+  const outboundEmail = emailSendRequiresExplicitApproval(toolName, options?.connectorKind);
   if (outboundEmail) {
     return {
       kind: "ask",

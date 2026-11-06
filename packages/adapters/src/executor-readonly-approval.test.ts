@@ -897,7 +897,39 @@ describe("connector read-only metadata and approval enforcement", () => {
     expect(reviewMock).not.toHaveBeenCalled();
   });
 
-  it("blocks Composio batches containing outbound emails before calling the provider", async () => {
+  it("requires individual owner approval for generic installed email tools", async () => {
+    const f = fixture({
+      name: "send_email",
+      route: { connectorId: "installed", resourceId: "install-1", toolName: "send_email" },
+      readOnly: false,
+      autoReview: true,
+      rules: [{ effect: "always_allow", matchKind: "tool", matchValue: "send_email" }],
+    });
+    f.setCalls([
+      {
+        args: { to: "person@example.test", subject: "Hi", body: "One message" },
+        executionId: "one",
+      },
+    ]);
+    await f.run();
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+    expect(f.pauseRunForInput).toHaveBeenCalledWith(
+      expect.objectContaining({
+        blocks: [
+          expect.objectContaining({
+            actions: [
+              { id: "allow", label: "Approve this email" },
+              { id: "deny", label: "Do not send" },
+            ],
+          }),
+        ],
+      }),
+    );
+    expect(reviewMock).not.toHaveBeenCalled();
+  });
+
+  it("blocks provider-neutral batches containing outbound emails before calling the provider", async () => {
     const f = fixture({
       name: "COMPOSIO_MULTI_EXECUTE_TOOL",
       readOnly: false,
@@ -908,7 +940,7 @@ describe("connector read-only metadata and approval enforcement", () => {
         args: {
           tools: [
             {
-              tool_slug: "GMAIL_SEND_EMAIL",
+              tool_slug: "send_email",
               arguments: {
                 to: "person@example.test",
                 subject: "Hi",
@@ -923,7 +955,10 @@ describe("connector read-only metadata and approval enforcement", () => {
     await f.run();
     expect(f.execute).not.toHaveBeenCalled();
     expect(f.pauseRunForInput).not.toHaveBeenCalled();
-    expect(f.results.some((r) => JSON.stringify(r).includes("direct tool call"))).toBe(true);
+    expect(f.results).toContainEqual({
+      error:
+        "Protected email or destructive actions must be separate direct tool calls for individual owner approval.",
+    });
   });
 
   describe.each([false, true])("catalog = %s", (catalog) => {
@@ -3254,7 +3289,7 @@ describe("retry of an action a person denied in the same run", () => {
     f.effects.push(
       denied(
         WRAPPER,
-        { tools: [{ tool_slug: "GMAIL_SEND_DRAFT" }] },
+        { tools: [{ tool_slug: "GMAIL_CREATE_DRAFT" }] },
         {
           id: "effect-r",
           idempotencyKey: "refused",
@@ -3262,7 +3297,7 @@ describe("retry of an action a person denied in the same run", () => {
         },
       ),
     );
-    f.setCalls([batch("GMAIL_SEND_DRAFT")]);
+    f.setCalls([batch("GMAIL_CREATE_DRAFT")]);
     await f.run();
     expect(f.execute).not.toHaveBeenCalled();
     expect(isApprovalPausedResult(f.results[0])).toBe(true);

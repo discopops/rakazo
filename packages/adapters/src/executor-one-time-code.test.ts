@@ -232,6 +232,7 @@ function world(printed = "") {
           if (printed) yield { type: "stdout" as const, data: printed };
           yield { type: "exit" as const, code: 0 };
         }),
+        readFile: vi.fn(async () => new TextEncoder().encode(printed)),
         async *exportWorkspace() {
           yield* [];
         },
@@ -429,7 +430,7 @@ describe("request_secret for a one-time code", () => {
       const run = world("field=482913 slots=4 8 2 9 1 3\nother=kept");
       await run.userAnswers();
       run.secrets[0]!.kind = `${kind}:run-1`;
-      const [result] = await run.attempt([{ name: "shell", args: { command: "read-page" } }]);
+      const [result] = await run.attempt([{ name: "read_file", args: { path: "page.txt" } }]);
       const text = JSON.stringify(result);
       expect(text).not.toContain("482913");
       expect(text).not.toContain("4 8 2 9 1 3");

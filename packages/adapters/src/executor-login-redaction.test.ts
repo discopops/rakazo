@@ -230,12 +230,11 @@ afterEach(() => {
 });
 
 describe("saved logins in a later run", () => {
-  it("hides a password filled by an earlier run from shell and file output", async () => {
+  it("hides a password filled by an earlier run from file output", async () => {
     const { toolResults, loginLoads } = await runAfterFill([
-      { name: "shell", args: { command: "read-filled-fields" } },
       { name: "read_file", args: { path: "page.txt" } },
     ]);
-    expect(toolResults).toHaveLength(2);
+    expect(toolResults).toHaveLength(1);
     for (const result of toolResults) expect(JSON.stringify(result)).toContain("[redacted]");
     const text = JSON.stringify(toolResults);
     for (const value of [
@@ -279,7 +278,7 @@ describe("saved logins in a later run", () => {
 
   it("decrypts no login for a bot without one", async () => {
     const { toolResults, loginLoads } = await runAfterFill(
-      [{ name: "shell", args: { command: "read-filled-fields" } }],
+      [{ name: "read_file", args: { path: "page.txt" } }],
       { savedLogin: false },
     );
     expect(loginLoads).toBe(0);

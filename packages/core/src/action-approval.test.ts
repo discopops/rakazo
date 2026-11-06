@@ -9,6 +9,7 @@ import {
   connectorReadRequiresApproval,
   connectorToolRequiresApproval,
   decisiveActionApprovalRules,
+  emailSendRequiresExplicitApproval,
   isApprovalAskBlock,
   isOwnerStartedRun,
   isSecretAskBlock,
@@ -1046,6 +1047,9 @@ describe("Responder mandatory owner approval", () => {
     for (const toolName of [
       "GMAIL_SEND_EMAIL",
       "GMAIL_REPLY_TO_EMAIL",
+      "send_email",
+      "reply_email",
+      "delete_email",
       "GMAIL_BATCH_DELETE_MESSAGES",
       "GMAIL_TRASH_MESSAGE",
       "GOOGLECALENDAR_DELETE_EVENT",
@@ -1087,5 +1091,31 @@ describe("Responder mandatory owner approval", () => {
     expect(check({ toolName: "desktop_commander_start_process", args: { command: "pwd" } })).toBe(
       false,
     );
+  });
+});
+
+describe("mandatory per-email approval", () => {
+  it("recognizes outbound Gmail and Outlook actions but not draft creation", () => {
+    for (const name of [
+      "GMAIL_SEND_EMAIL",
+      "GMAIL_REPLY_TO_THREAD",
+      "GMAIL_SEND_DRAFT",
+      "OUTLOOK_SEND_EMAIL",
+      "MICROSOFT_OUTLOOK_FORWARD_MESSAGE",
+    ]) {
+      expect(emailSendRequiresExplicitApproval(name)).toBe(true);
+    }
+    expect(emailSendRequiresExplicitApproval("SEND_EMAIL", "gmail")).toBe(true);
+    expect(emailSendRequiresExplicitApproval("send_email")).toBe(true);
+    expect(emailSendRequiresExplicitApproval("reply_email")).toBe(true);
+    for (const name of [
+      "GMAIL_LIST_THREADS",
+      "GMAIL_CREATE_DRAFT",
+      "GMAIL_UPDATE_DRAFT",
+      "GMAIL_GET_MESSAGE",
+      "SLACK_SEND_MESSAGE",
+    ]) {
+      expect(emailSendRequiresExplicitApproval(name)).toBe(false);
+    }
   });
 });
